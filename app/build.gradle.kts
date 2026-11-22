@@ -18,21 +18,7 @@ android {
         versionName = "0.1.0"
     }
 
-    signingConfigs {
-        // Deterministic debug-only keystore so CI and local debug APKs share one signature
-        // and can be installed as in-place updates (never use for release builds).
-        getByName("debug") {
-            storeFile = file("debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
-        }
-    }
-
     buildTypes {
-        debug {
-            signingConfig = signingConfigs.getByName("debug")
-        }
         release {
             isMinifyEnabled = false
         }
