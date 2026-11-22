@@ -16,11 +16,13 @@ interface DeviceInfoProvider {
 interface DeviceController {
     suspend fun getHealth(): HealthResponse
     suspend fun getDeviceInfo(): DeviceInfoResponse
+    suspend fun captureScreenshot(options: CaptureOptions = CaptureOptions()): CaptureResult
 }
 
 class DefaultDeviceController(
     private val accessibilityRegistry: AccessibilityServiceRegistry,
     private val deviceInfoProvider: DeviceInfoProvider,
+    private val screenCapturer: ScreenCapturer,
     private val serverVersion: String,
 ) : DeviceController {
 
@@ -36,6 +38,10 @@ class DefaultDeviceController(
 
     override suspend fun getDeviceInfo(): DeviceInfoResponse {
         return deviceInfoProvider.getDeviceInfo()
+    }
+
+    override suspend fun captureScreenshot(options: CaptureOptions): CaptureResult {
+        return screenCapturer.capture(options)
     }
 
     /**

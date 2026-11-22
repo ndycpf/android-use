@@ -65,6 +65,29 @@ class ProtocolModelsTest {
     }
 
     @Test
+    fun `ScreenshotResponse serializes lowercase image format and metadata`() {
+        val original = ScreenshotResponse(
+            format = ImageFormat.JPEG,
+            mimeType = "image/jpeg",
+            width = 576,
+            height = 1280,
+            displayWidth = 1080,
+            displayHeight = 2400,
+            scale = 1280.0 / 2400.0,
+            rotation = 0,
+            timestampMs = 1_700_000_000_000L,
+            dataBase64 = "ZmFrZQ==",
+        )
+
+        val encoded = json.encodeToString(original)
+        val decoded = json.decodeFromString<ScreenshotResponse>(encoded)
+
+        assertEquals(original, decoded)
+        assertTrue(encoded.contains("\"format\":\"jpeg\""))
+        assertTrue(encoded.contains("\"mimeType\":\"image/jpeg\""))
+    }
+
+    @Test
     fun `ProtocolJson ignores unknown fields for forward compatibility`() {
         val payload = """
             {

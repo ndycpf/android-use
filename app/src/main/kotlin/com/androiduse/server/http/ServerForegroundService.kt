@@ -11,9 +11,11 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import com.androiduse.R
+import com.androiduse.android.AccessibilityScreenCapturer
 import com.androiduse.android.AndroidDeviceInfoProvider
 import com.androiduse.core.AccessibilityServiceRegistry
 import com.androiduse.core.DefaultDeviceController
+import com.androiduse.core.ResilientScreenCapturer
 import com.androiduse.core.ServerState
 import com.androiduse.core.ServerStateRegistry
 import com.androiduse.ui.MainActivity
@@ -81,9 +83,16 @@ class ServerForegroundService : Service() {
             accessibilityRegistry = accessibilityRegistry,
             serverVersion = versionName,
         )
+        val screenCapturer = ResilientScreenCapturer(
+            delegate = AccessibilityScreenCapturer(
+                context = applicationContext,
+                accessibilityRegistry = accessibilityRegistry,
+            ),
+        )
         val controller = DefaultDeviceController(
             accessibilityRegistry = accessibilityRegistry,
             deviceInfoProvider = deviceInfoProvider,
+            screenCapturer = screenCapturer,
             serverVersion = versionName,
         )
 

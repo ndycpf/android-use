@@ -27,5 +27,26 @@ class AndroidUseException(
             httpStatus = 400,
             retryable = false,
         )
+
+        fun screenshotRateLimited(
+            message: String = "Screen capture rate limit exceeded; retry shortly.",
+        ): AndroidUseException = AndroidUseException(
+            code = ErrorCode.SCREENSHOT_RATE_LIMITED,
+            message = message,
+            httpStatus = 429,
+            retryable = true,
+        )
+
+        fun screenshotFailed(
+            message: String,
+            retryable: Boolean = false,
+            cause: Throwable? = null,
+        ): AndroidUseException = AndroidUseException(
+            code = ErrorCode.SCREENSHOT_FAILED,
+            message = message,
+            httpStatus = 500,
+            retryable = retryable,
+            cause = cause,
+        )
     }
 }

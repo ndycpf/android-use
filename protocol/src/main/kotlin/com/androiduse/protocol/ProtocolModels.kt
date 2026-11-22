@@ -1,5 +1,6 @@
 package com.androiduse.protocol
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -19,9 +20,19 @@ enum class ErrorCode {
     ACCESSIBILITY_NOT_CONNECTED,
     INVALID_REQUEST,
     SCREENSHOT_FAILED,
+    SCREENSHOT_RATE_LIMITED,
     ACTION_FAILED,
     UNSUPPORTED_OPERATION,
     INTERNAL_ERROR,
+}
+
+@Serializable
+enum class ImageFormat(val mimeType: String) {
+    @SerialName("jpeg")
+    JPEG("image/jpeg"),
+
+    @SerialName("png")
+    PNG("image/png"),
 }
 
 @Serializable
@@ -55,4 +66,18 @@ data class DeviceInfoResponse(
     val serverVersion: String,
     val accessibilityConnected: Boolean,
     val foregroundPackage: String? = null,
+)
+
+@Serializable
+data class ScreenshotResponse(
+    val format: ImageFormat,
+    val mimeType: String,
+    val width: Int,
+    val height: Int,
+    val displayWidth: Int,
+    val displayHeight: Int,
+    val scale: Double,
+    val rotation: Int,
+    val timestampMs: Long,
+    val dataBase64: String,
 )
