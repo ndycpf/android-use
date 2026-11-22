@@ -4,13 +4,18 @@ import com.androiduse.core.AndroidUseException
 import com.androiduse.core.CaptureOptions
 import com.androiduse.core.CaptureResult
 import com.androiduse.core.DeviceController
+import com.androiduse.core.UiTreeOptions
 import com.androiduse.protocol.DeviceInfoResponse
 import com.androiduse.protocol.ErrorCode
 import com.androiduse.protocol.ErrorResponse
 import com.androiduse.protocol.HealthResponse
 import com.androiduse.protocol.ImageFormat
 import com.androiduse.protocol.ProtocolJson
+import com.androiduse.protocol.ScreenStateResponse
 import com.androiduse.protocol.ScreenshotResponse
+import com.androiduse.protocol.UiBounds
+import com.androiduse.protocol.UiNode
+import com.androiduse.protocol.UiTreeResponse
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsBytes
 import io.ktor.client.statement.bodyAsText
@@ -20,6 +25,8 @@ import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -201,6 +208,77 @@ class LocalHttpRoutesTest {
     }
 
     @Test
+    fun `GET v1 screen tree returns normalized UiTreeResponse and parses query options`() = testApplication {
+        val controller = FakeDeviceController()
+        application {
+            configureAndroidUseHttp(controller)
+        }
+
+        val response = client.get(
+            "/v1/screen/tree?maxDepth=12&maxNodes=150&includeInvisible=true&prune=false&allWindows=true",
+        )
+        assertEquals(HttpStatusCode.OK, response.status)
+
+        val tree = json.decodeFromString<UiTreeResponse>(response.bodyAsText())
+        assertEquals("com.example.home", tree.packageName)
+        assertEquals(1, tree.nodeCount)
+        assertEquals("n1", tree.roots.first().nodeId)
+        assertEquals(
+            UiTreeOptions(
+                maxDepth = 12,
+                maxNodes = 150,
+                includeInvisible = true,
+                pruneEmptyContainers = false,
+                includeAllWindows = true,
+            ),
+            controller.lastTreeOptions,
+        )
+    }
+
+    @Test
+    fun `GET v1 screen tree rejects invalid maxDepth and boolean flags with 400`() = testApplication {
+        application {
+            configureAndroidUseHttp(FakeDeviceController())
+        }
+
+        val badDepth = client.get("/v1/screen/tree?maxDepth=0")
+        assertEquals(HttpStatusCode.BadRequest, badDepth.status)
+        assertEquals(
+            ErrorCode.INVALID_REQUEST,
+            json.decodeFromString<ErrorResponse>(badDepth.bodyAsText()).error.code,
+        )
+
+        val badBool = client.get("/v1/screen/tree?prune=maybe")
+        assertEquals(HttpStatusCode.BadRequest, badBool.status)
+        assertEquals(
+            ErrorCode.INVALID_REQUEST,
+            json.decodeFromString<ErrorResponse>(badBool.bodyAsText()).error.code,
+        )
+    }
+
+    @Test
+    fun `GET v1 screen state returns combined device, tree, and optional screenshot`() = testApplication {
+        val controller = FakeDeviceController()
+        application {
+            configureAndroidUseHttp(controller)
+        }
+
+        val withShot = client.get("/v1/screen/state?format=png&maxNodes=80")
+        assertEquals(HttpStatusCode.OK, withShot.status)
+        val state1 = json.decodeFromString<ScreenStateResponse>(withShot.bodyAsText())
+        assertNotNull(state1.screenshot)
+        assertEquals(ImageFormat.PNG, controller.lastCaptureOptions?.format)
+        assertEquals(80, controller.lastTreeOptions?.maxNodes)
+        assertTrue(controller.lastIncludeScreenshot == true)
+
+        val withoutShot = client.get("/v1/screen/state?includeScreenshot=false")
+        assertEquals(HttpStatusCode.OK, withoutShot.status)
+        val state2 = json.decodeFromString<ScreenStateResponse>(withoutShot.bodyAsText())
+        assertNull(state2.screenshot)
+        assertFalse(controller.lastIncludeScreenshot!!)
+    }
+
+    @Test
     fun `GET v1 screen screenshot maps rate-limit exception to 429`() = testApplication {
         val controller = FakeDeviceController(
             screenshotError = AndroidUseException.screenshotRateLimited(),
@@ -331,8 +409,26 @@ class LocalHttpRoutesTest {
             timestampMs = 1L,
         ),
         private val screenshotError: Throwable? = null,
+        private val uiTreeResponse: UiTreeResponse = UiTreeResponse(
+            packageName = "com.example.home",
+            windowCount = 1,
+            nodeCount = 1,
+            truncated = false,
+            timestampMs = 2L,
+            roots = listOf(
+                UiNode(
+                    nodeId = "n1",
+                    text = "Search",
+                    bounds = UiBounds(10, 20, 210, 120),
+                    center = UiBounds(10, 20, 210, 120).center(),
+                    clickable = true,
+                ),
+            ),
+        ),
     ) : DeviceController {
         var lastCaptureOptions: CaptureOptions? = null
+        var lastTreeOptions: UiTreeOptions? = null
+        var lastIncludeScreenshot: Boolean? = null
 
         override suspend fun getHealth(): HealthResponse = health
 
@@ -345,6 +441,27 @@ class LocalHttpRoutesTest {
             lastCaptureOptions = options
             screenshotError?.let { throw it }
             return screenshotResult
+        }
+
+        override suspend fun getUiTree(options: UiTreeOptions): UiTreeResponse {
+            lastTreeOptions = options
+            return uiTreeResponse
+        }
+
+        override suspend fun getScreenState(
+            captureOptions: CaptureOptions,
+            treeOptions: UiTreeOptions,
+            includeScreenshot: Boolean,
+        ): ScreenStateResponse {
+            lastCaptureOptions = captureOptions
+            lastTreeOptions = treeOptions
+            lastIncludeScreenshot = includeScreenshot
+            return ScreenStateResponse(
+                device = deviceInfo,
+                screenshot = if (includeScreenshot) screenshotResult.toBase64Response() else null,
+                tree = uiTreeResponse,
+                timestampMs = 3L,
+            )
         }
     }
 }

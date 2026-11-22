@@ -2,17 +2,20 @@ package com.androiduse.core
 
 import com.androiduse.protocol.DeviceInfoResponse
 import com.androiduse.protocol.ImageFormat
+import com.androiduse.protocol.UiTreeResponse
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class DefaultDeviceControllerTest {
 
     @Test
-    fun `getHealth, getDeviceInfo, and captureScreenshot delegate accurately`() = runTest {
+    fun `getHealth, getDeviceInfo, captureScreenshot, getUiTree, and getScreenState delegate accurately`() = runTest {
         val registry = AccessibilityServiceRegistry()
         val fakeInfo = DeviceInfoResponse(
             displayWidth = 1080,
@@ -37,7 +40,17 @@ class DefaultDeviceControllerTest {
             rotation = 0,
             timestampMs = 42L,
         )
+        val fakeTree = UiTreeResponse(
+            packageName = "com.example.app",
+            windowCount = 1,
+            nodeCount = 0,
+            truncated = false,
+            timestampMs = 43L,
+            roots = emptyList(),
+        )
         var capturedOptions: CaptureOptions? = null
+        var inspectedOptions: UiTreeOptions? = null
+        var captureCount = 0
         val controller = DefaultDeviceController(
             accessibilityRegistry = registry,
             deviceInfoProvider = object : DeviceInfoProvider {
@@ -45,11 +58,19 @@ class DefaultDeviceControllerTest {
             },
             screenCapturer = object : ScreenCapturer {
                 override suspend fun capture(options: CaptureOptions): CaptureResult {
+                    captureCount++
                     capturedOptions = options
                     return fakeCapture
                 }
             },
+            uiTreeInspector = object : UiTreeInspector {
+                override suspend fun inspect(options: UiTreeOptions): UiTreeResponse {
+                    inspectedOptions = options
+                    return fakeTree
+                }
+            },
             serverVersion = "0.1.0",
+            clockMs = { 99L },
         )
 
         val health = controller.getHealth()
@@ -58,9 +79,28 @@ class DefaultDeviceControllerTest {
         assertEquals("0.1.0", health.version)
         assertEquals(fakeInfo, controller.getDeviceInfo())
 
-        val requested = CaptureOptions(format = ImageFormat.PNG, quality = 90, maxDimension = 1200)
-        assertEquals(fakeCapture, controller.captureScreenshot(requested))
-        assertEquals(requested, capturedOptions)
+        val requestedCapture = CaptureOptions(format = ImageFormat.PNG, quality = 90, maxDimension = 1200)
+        assertEquals(fakeCapture, controller.captureScreenshot(requestedCapture))
+        assertEquals(requestedCapture, capturedOptions)
+
+        val requestedTree = UiTreeOptions(maxDepth = 15, maxNodes = 100)
+        assertEquals(fakeTree, controller.getUiTree(requestedTree))
+        assertEquals(requestedTree, inspectedOptions)
+
+        val stateWithShot = controller.getScreenState(
+            captureOptions = requestedCapture,
+            treeOptions = requestedTree,
+            includeScreenshot = true,
+        )
+        assertEquals(fakeInfo, stateWithShot.device)
+        assertEquals(fakeTree, stateWithShot.tree)
+        assertNotNull(stateWithShot.screenshot)
+        assertEquals(99L, stateWithShot.timestampMs)
+        assertEquals(2, captureCount)
+
+        val stateWithoutShot = controller.getScreenState(includeScreenshot = false)
+        assertNull(stateWithoutShot.screenshot)
+        assertEquals(2, captureCount)
     }
 
     @Test
@@ -72,6 +112,9 @@ class DefaultDeviceControllerTest {
             },
             screenCapturer = object : ScreenCapturer {
                 override suspend fun capture(options: CaptureOptions): CaptureResult = error("not used")
+            },
+            uiTreeInspector = object : UiTreeInspector {
+                override suspend fun inspect(options: UiTreeOptions): UiTreeResponse = error("not used")
             },
             serverVersion = "0.1.0",
         )

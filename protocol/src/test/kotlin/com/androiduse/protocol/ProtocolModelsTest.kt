@@ -88,6 +88,53 @@ class ProtocolModelsTest {
     }
 
     @Test
+    fun `UiTreeResponse and ScreenStateResponse round-trip cleanly`() {
+        val bounds = UiBounds(left = 100, top = 200, right = 300, bottom = 280)
+        val button = UiNode(
+            nodeId = "n1",
+            packageName = "com.example.app",
+            className = "android.widget.Button",
+            resourceId = "com.example.app:id/submit",
+            text = "Submit",
+            bounds = bounds,
+            center = bounds.center(),
+            clickable = true,
+        )
+        val tree = UiTreeResponse(
+            packageName = "com.example.app",
+            windowCount = 1,
+            nodeCount = 1,
+            truncated = false,
+            timestampMs = 10_000L,
+            roots = listOf(button),
+        )
+        val state = ScreenStateResponse(
+            device = DeviceInfoResponse(
+                displayWidth = 1080,
+                displayHeight = 2400,
+                densityDpi = 420,
+                rotation = 0,
+                sdkInt = 35,
+                manufacturer = "Google",
+                model = "Pixel 9",
+                serverVersion = "0.1.0",
+                accessibilityConnected = true,
+                foregroundPackage = "com.example.app",
+            ),
+            screenshot = null,
+            tree = tree,
+            timestampMs = 10_000L,
+        )
+
+        val encoded = json.encodeToString(state)
+        val decoded = json.decodeFromString<ScreenStateResponse>(encoded)
+
+        assertEquals(state, decoded)
+        assertEquals(UiPoint(200, 240), decoded.tree.roots.first().center)
+        assertFalse(encoded.contains("\"screenshot\""))
+    }
+
+    @Test
     fun `ProtocolJson ignores unknown fields for forward compatibility`() {
         val payload = """
             {

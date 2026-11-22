@@ -2,6 +2,8 @@ package com.androiduse.core
 
 import com.androiduse.protocol.DeviceInfoResponse
 import com.androiduse.protocol.HealthResponse
+import com.androiduse.protocol.ScreenStateResponse
+import com.androiduse.protocol.UiTreeResponse
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -17,13 +19,21 @@ interface DeviceController {
     suspend fun getHealth(): HealthResponse
     suspend fun getDeviceInfo(): DeviceInfoResponse
     suspend fun captureScreenshot(options: CaptureOptions = CaptureOptions()): CaptureResult
+    suspend fun getUiTree(options: UiTreeOptions = UiTreeOptions()): UiTreeResponse
+    suspend fun getScreenState(
+        captureOptions: CaptureOptions = CaptureOptions(),
+        treeOptions: UiTreeOptions = UiTreeOptions(),
+        includeScreenshot: Boolean = true,
+    ): ScreenStateResponse
 }
 
 class DefaultDeviceController(
     private val accessibilityRegistry: AccessibilityServiceRegistry,
     private val deviceInfoProvider: DeviceInfoProvider,
     private val screenCapturer: ScreenCapturer,
+    private val uiTreeInspector: UiTreeInspector,
     private val serverVersion: String,
+    private val clockMs: () -> Long = { System.currentTimeMillis() },
 ) : DeviceController {
 
     private val actionMutex = Mutex()
@@ -42,6 +52,30 @@ class DefaultDeviceController(
 
     override suspend fun captureScreenshot(options: CaptureOptions): CaptureResult {
         return screenCapturer.capture(options)
+    }
+
+    override suspend fun getUiTree(options: UiTreeOptions): UiTreeResponse {
+        return uiTreeInspector.inspect(options)
+    }
+
+    override suspend fun getScreenState(
+        captureOptions: CaptureOptions,
+        treeOptions: UiTreeOptions,
+        includeScreenshot: Boolean,
+    ): ScreenStateResponse {
+        val device = getDeviceInfo()
+        val tree = getUiTree(treeOptions)
+        val screenshot = if (includeScreenshot) {
+            captureScreenshot(captureOptions).toBase64Response()
+        } else {
+            null
+        }
+        return ScreenStateResponse(
+            device = device,
+            screenshot = screenshot,
+            tree = tree,
+            timestampMs = clockMs(),
+        )
     }
 
     /**

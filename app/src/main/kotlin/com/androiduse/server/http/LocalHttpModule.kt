@@ -3,6 +3,7 @@ package com.androiduse.server.http
 import com.androiduse.core.AndroidUseException
 import com.androiduse.core.CaptureOptions
 import com.androiduse.core.DeviceController
+import com.androiduse.core.UiTreeOptions
 import com.androiduse.protocol.ApiError
 import com.androiduse.protocol.ErrorCode
 import com.androiduse.protocol.ErrorResponse
@@ -142,6 +143,25 @@ fun Application.configureAndroidUseHttp(
                     }
                 }
             }
+
+            get("/screen/tree") {
+                val treeOptions = parseUiTreeQuery(call.request.queryParameters)
+                call.respond(controller.getUiTree(treeOptions))
+            }
+
+            get("/screen/state") {
+                val params = call.request.queryParameters
+                val includeScreenshot = parseBooleanParam(params, "includeScreenshot", default = true)
+                val (captureOptions, _) = parseScreenshotQuery(params)
+                val treeOptions = parseUiTreeQuery(params)
+                call.respond(
+                    controller.getScreenState(
+                        captureOptions = captureOptions,
+                        treeOptions = treeOptions,
+                        includeScreenshot = includeScreenshot,
+                    ),
+                )
+            }
         }
     }
 }
@@ -199,4 +219,39 @@ private fun parseScreenshotQuery(params: Parameters): Pair<CaptureOptions, Scree
     ).validate()
 
     return options to encoding
+}
+
+private fun parseUiTreeQuery(params: Parameters): UiTreeOptions {
+    val maxDepth = params["maxDepth"]?.let { raw ->
+        raw.toIntOrNull()
+            ?: throw AndroidUseException.invalidRequest("Invalid maxDepth '$raw'. Expected integer.")
+    } ?: UiTreeOptions.DEFAULT_MAX_DEPTH
+
+    val maxNodes = params["maxNodes"]?.let { raw ->
+        raw.toIntOrNull()
+            ?: throw AndroidUseException.invalidRequest("Invalid maxNodes '$raw'. Expected integer.")
+    } ?: UiTreeOptions.DEFAULT_MAX_NODES
+
+    val includeInvisible = parseBooleanParam(params, "includeInvisible", default = false)
+    val pruneEmptyContainers = parseBooleanParam(params, "prune", default = true)
+    val includeAllWindows = parseBooleanParam(params, "allWindows", default = false)
+
+    return UiTreeOptions(
+        maxDepth = maxDepth,
+        maxNodes = maxNodes,
+        includeInvisible = includeInvisible,
+        pruneEmptyContainers = pruneEmptyContainers,
+        includeAllWindows = includeAllWindows,
+    ).validate()
+}
+
+private fun parseBooleanParam(params: Parameters, name: String, default: Boolean): Boolean {
+    return when (val raw = params[name]?.lowercase()) {
+        null, "" -> default
+        "true", "1" -> true
+        "false", "0" -> false
+        else -> throw AndroidUseException.invalidRequest(
+            "Invalid boolean for '$name': '$raw'. Expected 'true' or 'false'.",
+        )
+    }
 }
