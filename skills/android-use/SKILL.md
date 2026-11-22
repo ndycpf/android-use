@@ -124,11 +124,11 @@ scripts/android-use.sh run-jev "<subtask goal>" [--max-steps 12] [--text "<input
 
 ## Optional Fast Subtask Runner (Jev)
 
-If `TYPESAFE_API_KEY` (direct TypeSafe `/v1/systemone`, default `jev-latest`) or `OPENROUTER_API_KEY` (OpenRouter `/api/alpha/decisions`, default `typesafe/jev-1.14`) is set in the environment, you can delegate repetitive multi-step UI navigation to the fast System-1 runner instead of taking one LLM turn per tap:
+If `TYPESAFE_API_KEY` (direct TypeSafe `/v1/systemone`, default `jev-latest`) or `OPENROUTER_API_KEY` (OpenRouter `/api/alpha/decisions`, default `typesafe/jev-1.14`) is set in the environment, you can delegate repetitive UI navigation to the fast System-1 runner instead of taking one LLM turn per tap:
 
 ```bash
-scripts/android-use.sh run-jev "Open Network & internet and enable Wi-Fi" --max-steps 8
-scripts/android-use.sh run-jev "Search for Tokyo weather" --text "Tokyo weather" --submit
+scripts/android-use.sh run-jev "Currently on Google Maps home. Search for udon. Done when the search results list is visible. Do not tap 'Ask Maps'." --text "udon" --submit --max-steps 5
+scripts/android-use.sh run-jev "Currently on Google Maps search results for udon. Open the first restaurant detail page. Done when the place name and 'Directions' button are visible." --max-steps 5
 ```
 
 - Runs text-first using live `marks` (~150–300ms per decision) and falls back to `screenshot?annotate=true` only when unlabeled icons or low confidence require vision (disable with `--no-vision`).
@@ -137,6 +137,15 @@ scripts/android-use.sh run-jev "Search for Tokyo weather" --text "Tokyo weather"
   - `0` (`status: "done"`): subtask completed.
   - `10` (`status: "escalate"` or `"max_steps"`): runner paused cleanly (e.g. needs free-form text, sensitive confirmation, low confidence, or Canvas screen) and printed `steps` + `last_screen_marks` so you can immediately resume with standard commands.
   - `2` (`code: "JEV_NOT_CONFIGURED"`): no Jev API key is set — continue normally with `marks` / `tree` / `tap-mark`.
+
+### Goal Prompting Tips for `run-jev`
+
+Jev is a fast System-1 decision model (not a multi-step planner). Bundling multiple stages into one goal (e.g. *"Search for udon and open the first result"*) often causes premature `done` on an intermediate screen. Structure each `run-jev` goal using these four rules:
+
+1. **1 goal = 1 target screen**: Split multi-stage tasks so each call ends on a single unambiguous destination screen (first *"Show search results for 'udon'"*, then *"Open the first restaurant's detail page"*).
+2. **State concrete on-screen completion criteria**: Specify visible UI markers that prove completion (e.g. *"Done when the place name and 'Directions' button are visible"* or *"Done when Wi-Fi shows (checked)"*) to sharpen `done` confidence.
+3. **Include explicit negative constraints**: Call out tempting distractors or wrong buttons to avoid (e.g. *"Do NOT tap 'Ask Maps'"* or *"Do NOT tap sponsored ads"*).
+4. **State the current starting screen**: Prefix the goal with where the phone is right now (e.g. *"Currently on Google Maps search results screen"*) so Jev immediately orients on step 1.
 
 ## Error Recovery
 

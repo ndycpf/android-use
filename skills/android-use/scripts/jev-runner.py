@@ -334,7 +334,10 @@ def build_decision_questions(
         "scroll_up": "Scroll up (swipe down) because the desired item is likely higher up the screen.",
         "back": "Press Android BACK to leave a wrong screen, dialog, or submenu.",
         "wait": "The screen is loading or transitioning; wait briefly before acting.",
-        "done": "The goal is already clearly completed on the current screen.",
+        "done": (
+            "ALL parts of the goal and any stated completion criteria are clearly satisfied and visible "
+            "on the current screen (do NOT choose done on an intermediate screen)."
+        ),
         "escalate": (
             "Stop and hand off to a full LLM/human because: free-form text not in provided_text is needed, "
             "a sensitive/irreversible action (payment, sending message, deleting data, password/2FA) is next, "
