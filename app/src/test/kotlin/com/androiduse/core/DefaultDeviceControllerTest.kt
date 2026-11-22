@@ -1,7 +1,15 @@
 package com.androiduse.core
 
+import com.androiduse.protocol.CoordinateSpace
 import com.androiduse.protocol.DeviceInfoResponse
+import com.androiduse.protocol.ErrorCode
+import com.androiduse.protocol.GlobalKey
 import com.androiduse.protocol.ImageFormat
+import com.androiduse.protocol.KeyRequest
+import com.androiduse.protocol.LongPressRequest
+import com.androiduse.protocol.SwipeRequest
+import com.androiduse.protocol.TapRequest
+import com.androiduse.protocol.UiPoint
 import com.androiduse.protocol.UiTreeResponse
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -10,47 +18,22 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class DefaultDeviceControllerTest {
 
     @Test
-    fun `getHealth, getDeviceInfo, captureScreenshot, getUiTree, and getScreenState delegate accurately`() = runTest {
+    fun `observation methods delegate accurately`() = runTest {
         val registry = AccessibilityServiceRegistry()
-        val fakeInfo = DeviceInfoResponse(
-            displayWidth = 1080,
-            displayHeight = 2400,
-            densityDpi = 420,
-            rotation = 0,
-            sdkInt = 35,
-            manufacturer = "Google",
-            model = "Pixel",
-            serverVersion = "0.1.0",
-            accessibilityConnected = false,
-        )
-        val fakeCapture = CaptureResult(
-            bytes = byteArrayOf(10, 20, 30),
-            format = ImageFormat.PNG,
-            mimeType = ImageFormat.PNG.mimeType,
-            width = 540,
-            height = 1200,
-            displayWidth = 1080,
-            displayHeight = 2400,
-            scale = 0.5,
-            rotation = 0,
-            timestampMs = 42L,
-        )
-        val fakeTree = UiTreeResponse(
-            packageName = "com.example.app",
-            windowCount = 1,
-            nodeCount = 0,
-            truncated = false,
-            timestampMs = 43L,
-            roots = emptyList(),
-        )
+        val fakeInfo = sampleDeviceInfo()
+        val fakeCapture = sampleCapture()
+        val fakeTree = sampleTree()
         var capturedOptions: CaptureOptions? = null
         var inspectedOptions: UiTreeOptions? = null
         var captureCount = 0
+
         val controller = DefaultDeviceController(
             accessibilityRegistry = registry,
             deviceInfoProvider = object : DeviceInfoProvider {
@@ -69,6 +52,7 @@ class DefaultDeviceControllerTest {
                     return fakeTree
                 }
             },
+            inputDispatcher = RecordingInputDispatcher(),
             serverVersion = "0.1.0",
             clockMs = { 99L },
         )
@@ -104,18 +88,86 @@ class DefaultDeviceControllerTest {
     }
 
     @Test
+    fun `tap, longPress, swipe, and pressKey resolve coordinates and dispatch actions`() = runTest {
+        val dispatcher = RecordingInputDispatcher()
+        val controller = DefaultDeviceController(
+            accessibilityRegistry = AccessibilityServiceRegistry(),
+            deviceInfoProvider = object : DeviceInfoProvider {
+                override fun getDeviceInfo(): DeviceInfoResponse = sampleDeviceInfo()
+            },
+            screenCapturer = object : ScreenCapturer {
+                override suspend fun capture(options: CaptureOptions): CaptureResult = sampleCapture()
+            },
+            uiTreeInspector = object : UiTreeInspector {
+                override suspend fun inspect(options: UiTreeOptions): UiTreeResponse = sampleTree()
+            },
+            inputDispatcher = dispatcher,
+            serverVersion = "0.1.0",
+            clockMs = { 500L },
+        )
+
+        val tapResp = controller.tap(
+            TapRequest(
+                x = 270.0,
+                y = 600.0,
+                coordinateSpace = CoordinateSpace.IMAGE,
+                imageWidth = 540,
+                imageHeight = 1200,
+                durationMs = 60L,
+            ),
+        )
+        assertTrue(tapResp.ok)
+        assertEquals("tap", tapResp.action)
+        assertEquals(UiPoint(540, 1200), tapResp.resolvedPoint)
+
+        val longResp = controller.longPress(
+            LongPressRequest(x = 0.5, y = 0.5, coordinateSpace = CoordinateSpace.NORMALIZED, durationMs = 700L),
+        )
+        assertEquals("long_press", longResp.action)
+        assertEquals(UiPoint(540, 1200), longResp.resolvedPoint)
+
+        val swipeResp = controller.swipe(
+            SwipeRequest(startX = 500.0, startY = 1800.0, endX = 500.0, endY = 600.0, durationMs = 300L),
+        )
+        assertEquals("swipe", swipeResp.action)
+        assertEquals(UiPoint(500, 1800), swipeResp.resolvedPoint)
+        assertEquals(UiPoint(500, 600), swipeResp.resolvedEndPoint)
+
+        val keyResp = controller.pressKey(KeyRequest(GlobalKey.BACK))
+        assertEquals("key", keyResp.action)
+
+        assertEquals(
+            listOf(
+                "tap:(540,1200):60",
+                "longPress:(540,1200):700",
+                "swipe:(500,1800)->(500,600):300",
+                "key:BACK",
+            ),
+            dispatcher.events,
+        )
+
+        try {
+            controller.tap(TapRequest(x = 10.0, y = 10.0, durationMs = 5L))
+            fail("Expected invalid duration error")
+        } catch (e: AndroidUseException) {
+            assertEquals(ErrorCode.INVALID_REQUEST, e.code)
+        }
+    }
+
+    @Test
     fun `withActionLock serializes overlapping actions without interleaving`() = runTest {
         val controller = DefaultDeviceController(
             accessibilityRegistry = AccessibilityServiceRegistry(),
             deviceInfoProvider = object : DeviceInfoProvider {
-                override fun getDeviceInfo(): DeviceInfoResponse = error("not used")
+                override fun getDeviceInfo(): DeviceInfoResponse = sampleDeviceInfo()
             },
             screenCapturer = object : ScreenCapturer {
-                override suspend fun capture(options: CaptureOptions): CaptureResult = error("not used")
+                override suspend fun capture(options: CaptureOptions): CaptureResult = sampleCapture()
             },
             uiTreeInspector = object : UiTreeInspector {
-                override suspend fun inspect(options: UiTreeOptions): UiTreeResponse = error("not used")
+                override suspend fun inspect(options: UiTreeOptions): UiTreeResponse = sampleTree()
             },
+            inputDispatcher = RecordingInputDispatcher(),
             serverVersion = "0.1.0",
         )
         val events = mutableListOf<String>()
@@ -142,5 +194,59 @@ class DefaultDeviceControllerTest {
             listOf("first-start", "first-end", "second-start", "second-end"),
             events,
         )
+    }
+
+    private fun sampleDeviceInfo() = DeviceInfoResponse(
+        displayWidth = 1080,
+        displayHeight = 2400,
+        densityDpi = 420,
+        rotation = 0,
+        sdkInt = 35,
+        manufacturer = "Google",
+        model = "Pixel",
+        serverVersion = "0.1.0",
+        accessibilityConnected = false,
+    )
+
+    private fun sampleCapture() = CaptureResult(
+        bytes = byteArrayOf(10, 20, 30),
+        format = ImageFormat.PNG,
+        mimeType = ImageFormat.PNG.mimeType,
+        width = 540,
+        height = 1200,
+        displayWidth = 1080,
+        displayHeight = 2400,
+        scale = 0.5,
+        rotation = 0,
+        timestampMs = 42L,
+    )
+
+    private fun sampleTree() = UiTreeResponse(
+        packageName = "com.example.app",
+        windowCount = 1,
+        nodeCount = 0,
+        truncated = false,
+        timestampMs = 43L,
+        roots = emptyList(),
+    )
+
+    private class RecordingInputDispatcher : InputDispatcher {
+        val events = mutableListOf<String>()
+
+        override suspend fun tap(point: UiPoint, durationMs: Long) {
+            events += "tap:(${point.x},${point.y}):$durationMs"
+        }
+
+        override suspend fun longPress(point: UiPoint, durationMs: Long) {
+            events += "longPress:(${point.x},${point.y}):$durationMs"
+        }
+
+        override suspend fun swipe(start: UiPoint, end: UiPoint, durationMs: Long) {
+            events += "swipe:(${start.x},${start.y})->(${end.x},${end.y}):$durationMs"
+        }
+
+        override suspend fun pressGlobalKey(key: GlobalKey) {
+            events += "key:$key"
+        }
     }
 }

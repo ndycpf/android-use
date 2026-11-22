@@ -8,7 +8,11 @@ import com.androiduse.protocol.ApiError
 import com.androiduse.protocol.ErrorCode
 import com.androiduse.protocol.ErrorResponse
 import com.androiduse.protocol.ImageFormat
+import com.androiduse.protocol.KeyRequest
+import com.androiduse.protocol.LongPressRequest
 import com.androiduse.protocol.ProtocolJson
+import com.androiduse.protocol.SwipeRequest
+import com.androiduse.protocol.TapRequest
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -21,12 +25,15 @@ import io.ktor.server.plugins.BadRequestException
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.header
+import io.ktor.server.request.receive
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
 import io.ktor.server.routing.get
+import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
+import kotlinx.serialization.SerializationException
 import java.security.MessageDigest
 
 fun Application.configureAndroidUseHttp(
@@ -57,7 +64,20 @@ fun Application.configureAndroidUseHttp(
                 message = ErrorResponse(
                     error = ApiError(
                         code = ErrorCode.INVALID_REQUEST,
-                        message = cause.message ?: "Invalid request payload.",
+                        message = cause.cause?.message ?: cause.message ?: "Invalid request payload.",
+                        retryable = false,
+                    ),
+                ),
+            )
+        }
+
+        exception<SerializationException> { call, cause ->
+            call.respond(
+                status = HttpStatusCode.BadRequest,
+                message = ErrorResponse(
+                    error = ApiError(
+                        code = ErrorCode.INVALID_REQUEST,
+                        message = cause.message ?: "Malformed JSON payload.",
                         retryable = false,
                     ),
                 ),
@@ -161,6 +181,28 @@ fun Application.configureAndroidUseHttp(
                         includeScreenshot = includeScreenshot,
                     ),
                 )
+            }
+
+            route("/actions") {
+                post("/tap") {
+                    val request = call.receive<TapRequest>()
+                    call.respond(controller.tap(request))
+                }
+
+                post("/long-press") {
+                    val request = call.receive<LongPressRequest>()
+                    call.respond(controller.longPress(request))
+                }
+
+                post("/swipe") {
+                    val request = call.receive<SwipeRequest>()
+                    call.respond(controller.swipe(request))
+                }
+
+                post("/key") {
+                    val request = call.receive<KeyRequest>()
+                    call.respond(controller.pressKey(request))
+                }
             }
         }
     }

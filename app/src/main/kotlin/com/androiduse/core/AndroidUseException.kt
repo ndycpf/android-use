@@ -57,5 +57,17 @@ class AndroidUseException(
             retryable = retryable,
             cause = cause,
         )
+
+        fun actionFailed(
+            message: String,
+            retryable: Boolean = false,
+            cause: Throwable? = null,
+        ): AndroidUseException = AndroidUseException(
+            code = ErrorCode.ACTION_FAILED,
+            message = message,
+            httpStatus = 500,
+            retryable = retryable,
+            cause = cause,
+        )
     }
 }

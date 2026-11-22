@@ -5,18 +5,28 @@ import com.androiduse.core.CaptureOptions
 import com.androiduse.core.CaptureResult
 import com.androiduse.core.DeviceController
 import com.androiduse.core.UiTreeOptions
+import com.androiduse.protocol.ActionResponse
+import com.androiduse.protocol.CoordinateSpace
 import com.androiduse.protocol.DeviceInfoResponse
 import com.androiduse.protocol.ErrorCode
 import com.androiduse.protocol.ErrorResponse
+import com.androiduse.protocol.GlobalKey
 import com.androiduse.protocol.HealthResponse
 import com.androiduse.protocol.ImageFormat
+import com.androiduse.protocol.KeyRequest
+import com.androiduse.protocol.LongPressRequest
 import com.androiduse.protocol.ProtocolJson
 import com.androiduse.protocol.ScreenStateResponse
 import com.androiduse.protocol.ScreenshotResponse
+import com.androiduse.protocol.SwipeRequest
+import com.androiduse.protocol.TapRequest
 import com.androiduse.protocol.UiBounds
 import com.androiduse.protocol.UiNode
+import com.androiduse.protocol.UiPoint
 import com.androiduse.protocol.UiTreeResponse
 import io.ktor.client.request.get
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsBytes
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
@@ -279,6 +289,79 @@ class LocalHttpRoutesTest {
     }
 
     @Test
+    fun `POST v1 actions endpoints deserialize requests and return ActionResponse`() = testApplication {
+        val controller = FakeDeviceController()
+        application {
+            configureAndroidUseHttp(controller)
+        }
+
+        val tapRes = client.post("/v1/actions/tap") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"x":897,"y":2365}""")
+        }
+        assertEquals(HttpStatusCode.OK, tapRes.status)
+        assertEquals("tap", json.decodeFromString<ActionResponse>(tapRes.bodyAsText()).action)
+        assertEquals(TapRequest(x = 897.0, y = 2365.0), controller.lastTapRequest)
+
+        val longRes = client.post("/v1/actions/long-press") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"x":0.5,"y":0.5,"coordinateSpace":"normalized","durationMs":750}""")
+        }
+        assertEquals(HttpStatusCode.OK, longRes.status)
+        assertEquals("long_press", json.decodeFromString<ActionResponse>(longRes.bodyAsText()).action)
+        assertEquals(
+            LongPressRequest(x = 0.5, y = 0.5, coordinateSpace = CoordinateSpace.NORMALIZED, durationMs = 750L),
+            controller.lastLongPressRequest,
+        )
+
+        val swipeRes = client.post("/v1/actions/swipe") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"startX":540,"startY":1800,"endX":540,"endY":600,"durationMs":300}""")
+        }
+        assertEquals(HttpStatusCode.OK, swipeRes.status)
+        assertEquals("swipe", json.decodeFromString<ActionResponse>(swipeRes.bodyAsText()).action)
+        assertEquals(
+            SwipeRequest(startX = 540.0, startY = 1800.0, endX = 540.0, endY = 600.0, durationMs = 300L),
+            controller.lastSwipeRequest,
+        )
+
+        val keyRes = client.post("/v1/actions/key") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"key":"HOME"}""")
+        }
+        assertEquals(HttpStatusCode.OK, keyRes.status)
+        assertEquals("key", json.decodeFromString<ActionResponse>(keyRes.bodyAsText()).action)
+        assertEquals(KeyRequest(GlobalKey.HOME), controller.lastKeyRequest)
+    }
+
+    @Test
+    fun `POST v1 actions rejects malformed JSON or invalid enum with 400 INVALID_REQUEST`() = testApplication {
+        application {
+            configureAndroidUseHttp(FakeDeviceController())
+        }
+
+        val badTap = client.post("/v1/actions/tap") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"x":"not-a-number"}""")
+        }
+        assertEquals(HttpStatusCode.BadRequest, badTap.status)
+        assertEquals(
+            ErrorCode.INVALID_REQUEST,
+            json.decodeFromString<ErrorResponse>(badTap.bodyAsText()).error.code,
+        )
+
+        val badKey = client.post("/v1/actions/key") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"key":"NON_EXISTENT"}""")
+        }
+        assertEquals(HttpStatusCode.BadRequest, badKey.status)
+        assertEquals(
+            ErrorCode.INVALID_REQUEST,
+            json.decodeFromString<ErrorResponse>(badKey.bodyAsText()).error.code,
+        )
+    }
+
+    @Test
     fun `GET v1 screen screenshot maps rate-limit exception to 429`() = testApplication {
         val controller = FakeDeviceController(
             screenshotError = AndroidUseException.screenshotRateLimited(),
@@ -429,6 +512,10 @@ class LocalHttpRoutesTest {
         var lastCaptureOptions: CaptureOptions? = null
         var lastTreeOptions: UiTreeOptions? = null
         var lastIncludeScreenshot: Boolean? = null
+        var lastTapRequest: TapRequest? = null
+        var lastLongPressRequest: LongPressRequest? = null
+        var lastSwipeRequest: SwipeRequest? = null
+        var lastKeyRequest: KeyRequest? = null
 
         override suspend fun getHealth(): HealthResponse = health
 
@@ -461,6 +548,50 @@ class LocalHttpRoutesTest {
                 screenshot = if (includeScreenshot) screenshotResult.toBase64Response() else null,
                 tree = uiTreeResponse,
                 timestampMs = 3L,
+            )
+        }
+
+        override suspend fun tap(request: TapRequest): ActionResponse {
+            lastTapRequest = request
+            return ActionResponse(
+                ok = true,
+                action = "tap",
+                resolvedPoint = UiPoint(request.x.toInt(), request.y.toInt()),
+                durationMs = request.durationMs,
+                timestampMs = 4L,
+            )
+        }
+
+        override suspend fun longPress(request: LongPressRequest): ActionResponse {
+            lastLongPressRequest = request
+            return ActionResponse(
+                ok = true,
+                action = "long_press",
+                resolvedPoint = UiPoint(request.x.toInt(), request.y.toInt()),
+                durationMs = request.durationMs,
+                timestampMs = 5L,
+            )
+        }
+
+        override suspend fun swipe(request: SwipeRequest): ActionResponse {
+            lastSwipeRequest = request
+            return ActionResponse(
+                ok = true,
+                action = "swipe",
+                resolvedPoint = UiPoint(request.startX.toInt(), request.startY.toInt()),
+                resolvedEndPoint = UiPoint(request.endX.toInt(), request.endY.toInt()),
+                durationMs = request.durationMs,
+                timestampMs = 6L,
+            )
+        }
+
+        override suspend fun pressKey(request: KeyRequest): ActionResponse {
+            lastKeyRequest = request
+            return ActionResponse(
+                ok = true,
+                action = "key",
+                durationMs = 0L,
+                timestampMs = 7L,
             )
         }
     }

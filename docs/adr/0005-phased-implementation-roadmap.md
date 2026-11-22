@@ -123,8 +123,9 @@ Implementation will proceed sequentially through **9 small phases (Phase 0 throu
 - **Deliverables**:
   - `AppController`: list launchable apps (`GET /v1/apps`), launch by `packageName` or open `uri` (`POST /v1/apps/launch`).
   - `POST /v1/wait`: sleep or poll UI tree until a target text/node appears or disappears (with timeout).
-  - Optional LAN bind mode with mandatory Bearer token authentication (generated and viewable/rotatable in UI).
+  - Optional LAN bind mode with mandatory Bearer token authentication (generated and viewable/rotatable in UI). *(Note: Tailscale/LAN bind with Bearer auth was delivered early after Phase 2 to enable cable-free device testing.)*
   - Optional visual debug overlay (briefly highlights tap coordinates and swipe paths on screen) + emergency stop notification action.
+  - **UI tree payload optimization** (deferred from Phase 3 after real-device Gmail tree inspection): collapse `resourceId`-only non-interactive layout wrappers (`FrameLayout`/`LinearLayout`/`View` without text, description, or interactive flags) and omit redundant child `packageName` / default false flags to reduce LLM token overhead.
 - **Out of Scope**: MCP protocol and LLM API client.
 - **Verification**:
   - Unit tests for wait polling/timeouts, auth middleware (loopback vs LAN token enforcement), and app query filtering.

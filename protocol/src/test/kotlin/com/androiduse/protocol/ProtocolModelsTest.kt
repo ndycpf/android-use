@@ -135,6 +135,39 @@ class ProtocolModelsTest {
     }
 
     @Test
+    fun `action requests and ActionResponse serialize cleanly with defaults`() {
+        val tap = json.decodeFromString<TapRequest>("""{"x":897,"y":2365}""")
+        assertEquals(897.0, tap.x, 1e-6)
+        assertEquals(2365.0, tap.y, 1e-6)
+        assertEquals(CoordinateSpace.PIXEL, tap.coordinateSpace)
+        assertEquals(50L, tap.durationMs)
+
+        val swipe = SwipeRequest(
+            startX = 0.5,
+            startY = 0.8,
+            endX = 0.5,
+            endY = 0.2,
+            coordinateSpace = CoordinateSpace.NORMALIZED,
+            durationMs = 350L,
+        )
+        val swipeJson = json.encodeToString(swipe)
+        assertTrue(swipeJson.contains("\"coordinateSpace\":\"normalized\""))
+        assertEquals(swipe, json.decodeFromString<SwipeRequest>(swipeJson))
+
+        val key = KeyRequest(key = GlobalKey.HOME)
+        assertEquals(key, json.decodeFromString<KeyRequest>(json.encodeToString(key)))
+
+        val resp = ActionResponse(
+            ok = true,
+            action = "tap",
+            resolvedPoint = UiPoint(897, 2365),
+            durationMs = 50L,
+            timestampMs = 5_000L,
+        )
+        assertEquals(resp, json.decodeFromString<ActionResponse>(json.encodeToString(resp)))
+    }
+
+    @Test
     fun `ProtocolJson ignores unknown fields for forward compatibility`() {
         val payload = """
             {

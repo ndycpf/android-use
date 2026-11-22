@@ -37,6 +37,28 @@ enum class ImageFormat(val mimeType: String) {
 }
 
 @Serializable
+enum class CoordinateSpace {
+    @SerialName("pixel")
+    PIXEL,
+
+    @SerialName("normalized")
+    NORMALIZED,
+
+    @SerialName("image")
+    IMAGE,
+}
+
+@Serializable
+enum class GlobalKey {
+    BACK,
+    HOME,
+    RECENTS,
+    NOTIFICATIONS,
+    QUICK_SETTINGS,
+    DISMISS_NOTIFICATION_SHADE,
+}
+
+@Serializable
 data class ApiError(
     val code: ErrorCode,
     val message: String,
@@ -147,5 +169,52 @@ data class ScreenStateResponse(
     val device: DeviceInfoResponse,
     val screenshot: ScreenshotResponse? = null,
     val tree: UiTreeResponse,
+    val timestampMs: Long,
+)
+
+@Serializable
+data class TapRequest(
+    val x: Double,
+    val y: Double,
+    val coordinateSpace: CoordinateSpace = CoordinateSpace.PIXEL,
+    val imageWidth: Int? = null,
+    val imageHeight: Int? = null,
+    val durationMs: Long = 50L,
+)
+
+@Serializable
+data class LongPressRequest(
+    val x: Double,
+    val y: Double,
+    val coordinateSpace: CoordinateSpace = CoordinateSpace.PIXEL,
+    val imageWidth: Int? = null,
+    val imageHeight: Int? = null,
+    val durationMs: Long = 600L,
+)
+
+@Serializable
+data class SwipeRequest(
+    val startX: Double,
+    val startY: Double,
+    val endX: Double,
+    val endY: Double,
+    val coordinateSpace: CoordinateSpace = CoordinateSpace.PIXEL,
+    val imageWidth: Int? = null,
+    val imageHeight: Int? = null,
+    val durationMs: Long = 300L,
+)
+
+@Serializable
+data class KeyRequest(
+    val key: GlobalKey,
+)
+
+@Serializable
+data class ActionResponse(
+    val ok: Boolean,
+    val action: String,
+    val resolvedPoint: UiPoint? = null,
+    val resolvedEndPoint: UiPoint? = null,
+    val durationMs: Long,
     val timestampMs: Long,
 )
