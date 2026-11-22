@@ -4,9 +4,9 @@ Let AI agents see and operate a real Android phone — over Tailscale, no USB ca
 
 android-use is a small Android app that exposes the phone's screen and input as an HTTP/JSON API, plus an [Agent Skill](skills/android-use/SKILL.md) that teaches coding agents (Codex, Claude Code, Antigravity, …) how to use it.
 
-[![Demo: Codex cleaning up alarms on a phone over Tailscale](docs/assets/demo-thumbnail.png)](docs/assets/demo.mp4)
+<!-- Demo video: paste the uploaded https://github.com/user-attachments/assets/... URL on the line below -->
 
-▶ [Watch the demo (56s)](docs/assets/demo.mp4) — Codex is asked to keep only the 9:00 and 10:00 alarms, weekdays only, and does it on a real phone over Tailscale (parts sped up 2.5–7x).
+Demo: Codex is asked to keep only the 9:00 and 10:00 alarms, weekdays only, and does it on a real phone over Tailscale (parts sped up 2.5–7x).
 
 ## How it works
 
