@@ -185,6 +185,7 @@ class ServerForegroundService : Service() {
             powerController = powerController,
             overlayFeedback = overlay,
             screenshotAnnotator = com.androiduse.android.AndroidScreenshotAnnotator(),
+            uiChangeTracker = com.androiduse.core.UiChangeTracker.default,
             serverVersion = versionName,
         )
 

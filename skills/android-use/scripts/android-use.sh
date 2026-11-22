@@ -89,9 +89,12 @@ Commands:
   apps [query]                                   List launchable apps
   launch <packageName>                           Launch app by package name
   launch-uri <uri>                               Open URI or deep link
-  wait-sleep [durationMs]                        Sleep wait
-  wait-text <text> [timeoutMs]                   Wait until text appears
-  wait-gone <text> [timeoutMs]                   Wait until text disappears
+  wait-change [timeoutMs] [quietPeriodMs]        Smart event-driven wait for screen switch & settle + print marks
+  wait-idle [timeoutMs] [quietPeriodMs]          Wait until UI events settle & print marks
+  wait-package <packageName> [timeoutMs]         Wait for foreground app switch & print marks
+  wait-text <text> [timeoutMs]                   Wait until text appears (event-driven)
+  wait-gone <text> [timeoutMs]                   Wait until text disappears (event-driven)
+  wait-sleep [durationMs]                        Fixed sleep wait (use wait-change/wait-text instead)
 EOF
 }
 
@@ -100,6 +103,22 @@ print_marks_compact() {
     ([.marks[] | select((.text // "") == "" and (.contentDescription // "") == "" and (.hintText // "") == "")] | length) as $unlabeled |
     "marks: \(.count) (unlabeled: \($unlabeled), display: \(.displayWidth)x\(.displayHeight))",
     (.marks[] |
+      "[\(.markId)] " +
+      ((.text // .contentDescription // .hintText // .resourceId // .className // "(unlabeled)") | tostring) +
+      (if .editable then " (editable)"
+       elif .checkable then (if .checked then " (checked)" else " (unchecked)" end)
+       else "" end) +
+      " @(\(.center.x),\(.center.y))"
+    )
+  '
+}
+
+print_wait_marks_compact() {
+  jq -r '
+    (.marks // []) as $m |
+    ([$m[] | select((.text // "") == "" and (.contentDescription // "") == "" and (.hintText // "") == "")] | length) as $unlabeled |
+    "matched=\(.matched) changed=\(.screenChanged // .matched) elapsed=\(.elapsedMs)ms pkg=\(.foregroundPackage // "unknown") hash=\(.screenHash // "-") marks=\($m | length) (unlabeled: \($unlabeled))",
+    ($m[] |
       "[\(.markId)] " +
       ((.text // .contentDescription // .hintText // .resourceId // .className // "(unlabeled)") | tostring) +
       (if .editable then " (editable)"
@@ -385,6 +404,84 @@ case "$cmd" in
   launch-uri)
     uri="${1:?usage: launch-uri <uri>}"
     request POST "/v1/apps/launch" "{\"uri\":\"$(json_escape "$uri")\"}"
+    ;;
+
+  wait-change)
+    timeout="${1:-3000}"
+    quiet="${2:-150}"
+    tmp="$(mktemp)"
+    code="$(curl -sS -o "$tmp" -w '%{http_code}' -X POST "${AUTH_ARGS[@]}" \
+      -H "Content-Type: application/json" \
+      -d "{\"waitForChange\":true,\"timeoutMs\":${timeout},\"quietPeriodMs\":${quiet},\"includeMarks\":true,\"failOnTimeout\":false}" \
+      "${URL}/v1/wait")"
+    if (( code < 200 || code >= 300 )); then
+      pp < "$tmp"
+      rm -f "$tmp"
+      echo "HTTP ${code} (POST /v1/wait waitForChange)" >&2
+      exit 1
+    fi
+    if command -v jq >/dev/null 2>&1; then
+      print_wait_marks_compact < "$tmp"
+      changed="$(jq -r '.screenChanged // .matched // false' < "$tmp")"
+      rm -f "$tmp"
+      [[ "$changed" == "true" ]] || exit 10
+    else
+      pp < "$tmp"
+      rm -f "$tmp"
+    fi
+    ;;
+
+  wait-idle)
+    timeout="${1:-3000}"
+    quiet="${2:-150}"
+    tmp="$(mktemp)"
+    code="$(curl -sS -o "$tmp" -w '%{http_code}' -X POST "${AUTH_ARGS[@]}" \
+      -H "Content-Type: application/json" \
+      -d "{\"waitForIdle\":true,\"timeoutMs\":${timeout},\"quietPeriodMs\":${quiet},\"includeMarks\":true,\"failOnTimeout\":false}" \
+      "${URL}/v1/wait")"
+    if (( code < 200 || code >= 300 )); then
+      pp < "$tmp"
+      rm -f "$tmp"
+      echo "HTTP ${code} (POST /v1/wait waitForIdle)" >&2
+      exit 1
+    fi
+    if command -v jq >/dev/null 2>&1; then
+      print_wait_marks_compact < "$tmp"
+      rm -f "$tmp"
+    else
+      pp < "$tmp"
+      rm -f "$tmp"
+    fi
+    ;;
+
+  wait-package)
+    pkg="${1:?usage: wait-package <packageName> [timeoutMs] [quietPeriodMs]}"
+    timeout="${2:-5000}"
+    quiet="${3:-150}"
+    if command -v jq >/dev/null 2>&1; then
+      payload="$(jq -n --arg p "$pkg" --argjson to "$timeout" --argjson q "$quiet" \
+        '{packageName:$p, timeoutMs:$to, quietPeriodMs:$q, includeMarks:true}')"
+    else
+      payload="{\"packageName\":\"$(json_escape "$pkg")\",\"timeoutMs\":${timeout},\"quietPeriodMs\":${quiet},\"includeMarks\":true}"
+    fi
+    tmp="$(mktemp)"
+    code="$(curl -sS -o "$tmp" -w '%{http_code}' -X POST "${AUTH_ARGS[@]}" \
+      -H "Content-Type: application/json" \
+      -d "$payload" \
+      "${URL}/v1/wait")"
+    if (( code < 200 || code >= 300 )); then
+      pp < "$tmp"
+      rm -f "$tmp"
+      echo "HTTP ${code} (POST /v1/wait packageName=${pkg})" >&2
+      exit 1
+    fi
+    if command -v jq >/dev/null 2>&1; then
+      print_wait_marks_compact < "$tmp"
+      rm -f "$tmp"
+    else
+      pp < "$tmp"
+      rm -f "$tmp"
+    fi
     ;;
 
   wait-sleep)

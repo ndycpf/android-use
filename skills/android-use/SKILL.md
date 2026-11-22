@@ -67,10 +67,12 @@ Check `screenOn` and `deviceLocked` in the `session-start` / `info` response:
    - **Fallback 2 — Raw coordinate tap (`screenshot` + `tap-image` / `normalized`)**:
      - Use **only** when `marks`/`tree` cannot see the target at all (Canvas, games, maps, custom WebView) or when inspecting visual content (photos, colors, charts).
      - Check the `X-Image-Width` / `X-Image-Height` headers (downscaled to `maxDimension=1280` by default). **Never** pass scaled screenshot pixels into `tap <x> <y> pixel` — always use `tap-image <x> <y> <imageWidth> <imageHeight>` or `tap <x> <y> normalized` (`0.0..1.0`).
-5. **Verify state & recover cleanly when an action does not work**:
-   - After every 1–2 actions, verify the phone actually moved to the expected screen (`check` or `tap-jev`'s `screen_changed` + `after_foreground_package` + `after_screen_marks`).
-   - **Recovery Ladder** (when an action fails, hits the wrong screen, or `screen_changed: false`):
-     1. **Settle & re-check**: Wait briefly (`wait-sleep 500` or `wait-text "<expected>" 3000`) and run `check` before retrying — animations and network fetches often just needed a beat.
+5. **Smart transition waiting & recovery (never rely on fixed sleeps)**:
+   - After an action that triggers a screen transition, call `scripts/android-use.sh wait-change [timeoutMs]` (default `3000ms`, `quietPeriodMs=150ms`) — it wakes immediately on Android AccessibilityEvents as soon as the new screen settles and returns `changed`, `elapsed`, `pkg`, and fresh compact `marks` in **one** call.
+   - After `launch <packageName>`, call `scripts/android-use.sh wait-package <packageName> 5000` instead of `wait-sleep`.
+   - `tap-jev` automatically uses server-side `waitForChange` and returns `screen_changed`, `after_foreground_package`, and `after_screen_marks`.
+   - **Recovery Ladder** (when an action fails, hits the wrong screen, or `screen_changed: false` / `changed=false`):
+     1. **Wait for event/condition**: Run `wait-change 2500` or `wait-text "<expected>" 3000` (avoid blind `wait-sleep` unless explicitly needed) — animations or network loads will wake immediately once ready.
      2. **Inspect full `tree` & clear blockers**: Read `tree` for unexpected dialogs, permission prompts, snackbars, or focus errors (`409 NO_FOCUSED_INPUT`). Dismiss stray popups (`key BACK` or tap dismiss), or `swipe` once if the target is off-screen.
      3. **Escalate to visual Set-of-Mark**: If a text tap or `tap-jev` misses or produces `screen_changed: false` once after settling, switch immediately to `screenshot-marked /tmp/marked.jpg` → `tap-mark <id>` instead of repeating the same failing command.
      4. **Coordinate fallback or pause & report**: If the same step fails twice even with visual fallback (e.g. Canvas/WebView or blocked system UI), try `screenshot` + `tap-image` once, or stop and report the exact stuck state (`foregroundPackage` + visible marks) to the user. Never loop endlessly.
@@ -118,13 +120,16 @@ scripts/android-use.sh type <text> [clearFirst:true|false] [submit:true|false]
 scripts/android-use.sh clear
 scripts/android-use.sh ime [enter]
 
-# App control & wait helpers (session required)
+# App control & event-driven wait helpers (session required)
 scripts/android-use.sh apps [query]
 scripts/android-use.sh launch <packageName>
 scripts/android-use.sh launch-uri <uri>
-scripts/android-use.sh wait-sleep [durationMs]
+scripts/android-use.sh wait-change [timeoutMs] [quietPeriodMs]
+scripts/android-use.sh wait-idle [timeoutMs] [quietPeriodMs]
+scripts/android-use.sh wait-package <packageName> [timeoutMs]
 scripts/android-use.sh wait-text <text> [timeoutMs]
 scripts/android-use.sh wait-gone <text> [timeoutMs]
+scripts/android-use.sh wait-sleep [durationMs]
 ```
 
 ## Optional 1-Shot Jev Tap (`tap-jev`)

@@ -492,6 +492,94 @@ class DefaultDeviceControllerTest {
             }
         }
 
+    @Test
+    fun `waitFor waitForChange wakes immediately on transition event and uses pre-action baseline`() = runTest {
+        val tracker = UiChangeTracker(clockMs = { testScheduler.currentTime })
+        var currentPkg = "com.android.launcher"
+        var currentLabel = "Maps"
+
+        val controller = DefaultDeviceController(
+            accessibilityRegistry = AccessibilityServiceRegistry(),
+            deviceInfoProvider = object : DeviceInfoProvider {
+                override fun getDeviceInfo(): DeviceInfoResponse = sampleDeviceInfo()
+            },
+            screenCapturer = object : ScreenCapturer {
+                override suspend fun capture(options: CaptureOptions): CaptureResult = sampleCapture()
+            },
+            uiTreeInspector = object : UiTreeInspector {
+                override suspend fun inspect(options: UiTreeOptions): UiTreeResponse = UiTreeResponse(
+                    packageName = currentPkg,
+                    windowCount = 1,
+                    nodeCount = 1,
+                    timestampMs = testScheduler.currentTime,
+                    roots = listOf(
+                        UiNode(
+                            nodeId = "n1",
+                            text = currentLabel,
+                            bounds = UiBounds(100, 200, 500, 320),
+                            center = UiPoint(300, 260),
+                            clickable = true,
+                        ),
+                    ),
+                )
+            },
+            inputDispatcher = RecordingInputDispatcher(),
+            textInputController = RecordingTextInputController(),
+            appController = RecordingAppController(),
+            uiChangeTracker = tracker,
+            serverVersion = "0.1.0",
+            clockMs = { testScheduler.currentTime },
+        )
+
+        controller.startSession()
+
+        // Tap captures pre-action baseline ("com.android.launcher" / "Maps") automatically.
+        controller.tap(TapRequest(300.0, 260.0))
+
+        // Screen switches asynchronously 60ms later and fires an AccessibilityEvent.
+        val waitJob = async {
+            controller.waitFor(
+                WaitRequest(
+                    waitForChange = true,
+                    timeoutMs = 3_000L,
+                    quietPeriodMs = 100L,
+                    includeMarks = true,
+                    failOnTimeout = false,
+                ),
+            )
+        }
+        delay(60L)
+        currentPkg = "com.google.android.apps.maps"
+        currentLabel = "Search here"
+        tracker.recordEvent(eventType = 32, packageName = currentPkg, isWindowStateChange = true)
+
+        val waitRes = waitJob.await()
+        assertTrue(waitRes.ok)
+        assertTrue(waitRes.matched)
+        assertEquals(true, waitRes.screenChanged)
+        assertEquals("com.google.android.apps.maps", waitRes.foregroundPackage)
+        assertEquals(1, waitRes.marks?.size)
+        assertEquals("Search here", waitRes.marks!!.first().text)
+        assertTrue("Expected fast return after 60ms switch + 100ms quiet, got ${waitRes.elapsedMs}ms", waitRes.elapsedMs < 500L)
+
+        // When no change happens, failOnTimeout=false returns matched=false cleanly instead of throwing 408.
+        val noChange = controller.waitFor(
+            WaitRequest(
+                waitForChange = true,
+                baselineHash = waitRes.screenHash,
+                timeoutMs = 200L,
+                pollIntervalMs = 50L,
+                quietPeriodMs = 50L,
+                includeMarks = true,
+                failOnTimeout = false,
+            ),
+        )
+        assertTrue(noChange.ok)
+        assertFalse(noChange.matched)
+        assertEquals(false, noChange.screenChanged)
+        assertEquals(1, noChange.marks?.size)
+    }
+
     private suspend fun assertSessionRequired(block: suspend () -> Unit) {
         try {
             block()

@@ -79,6 +79,7 @@ class DefaultDeviceController(
     private val powerController: DevicePowerController = StaticDevicePowerController(),
     private val overlayFeedback: ActionOverlayFeedback = NoOpActionOverlayFeedback,
     private val screenshotAnnotator: ScreenshotAnnotator = NoOpScreenshotAnnotator,
+    private val uiChangeTracker: UiChangeTracker = UiChangeTracker(),
     private val serverVersion: String,
     private val clockMs: () -> Long = { System.currentTimeMillis() },
 ) : DeviceController {
@@ -88,6 +89,10 @@ class DefaultDeviceController(
     private var lastTree: UiTreeResponse? = null
     @Volatile
     private var lastMarks: MarksResponse? = null
+    @Volatile
+    private var lastPreActionHash: String? = null
+    @Volatile
+    private var lastPreActionTimeMs: Long = 0L
 
     override suspend fun getHealth(): HealthResponse {
         val sessionActive = sessionManager.currentSession() != null
@@ -132,6 +137,8 @@ class DefaultDeviceController(
         sessionManager.endSession()
         lastTree = null
         lastMarks = null
+        lastPreActionHash = null
+        lastPreActionTimeMs = 0L
         overlayFeedback.setSessionActive(active = false, label = null, keepAwake = false)
         return toSessionResponse(null, powerController.getPowerState())
     }
@@ -610,11 +617,13 @@ class DefaultDeviceController(
         sessionManager.requireActiveSessionAndTouch()
         val hasText = !request.text.isNullOrEmpty()
         val hasResId = !request.resourceId.isNullOrEmpty()
-        val hasCondition = hasText || hasResId
+        val targetPackage = request.packageName?.trim()?.takeIf { it.isNotEmpty() }
+        val hasPackage = targetPackage != null
+        val hasCondition = hasText || hasResId || hasPackage || request.waitForChange || request.waitForIdle
 
         if (!hasCondition && request.durationMs == null) {
             throw AndroidUseException.invalidRequest(
-                "Provide 'durationMs' for a sleep wait, or 'text'/'resourceId' for a condition wait.",
+                "Provide 'durationMs' for a sleep wait, or 'waitForChange'/'waitForIdle'/'packageName'/'text'/'resourceId' for a condition wait.",
             )
         }
 
@@ -638,43 +647,191 @@ class DefaultDeviceController(
 
         validateDuration(request.timeoutMs, minMs = 100L, maxMs = MAX_WAIT_TIMEOUT_MS, name = "timeoutMs")
         validateDuration(request.pollIntervalMs, minMs = 50L, maxMs = MAX_POLL_INTERVAL_MS, name = "pollIntervalMs")
+        validateDuration(request.quietPeriodMs, minMs = 0L, maxMs = MAX_QUIET_PERIOD_MS, name = "quietPeriodMs")
+
+        // Pure waitForIdle mode: wait until UI events stay quiet for quietPeriodMs, then snapshot state.
+        if (request.waitForIdle && !request.waitForChange && !hasText && !hasResId && !hasPackage) {
+            val settled = uiChangeTracker.awaitQuiet(
+                quietPeriodMs = request.quietPeriodMs,
+                maxWaitMs = request.timeoutMs,
+            )
+            val tree = uiTreeInspector.inspect(UiTreeOptions())
+            lastTree = tree
+            val hash = UiTreeFingerprint.compute(tree)
+            val marks = if (request.includeMarks) computeAndCacheMarks(tree) else null
+            val now = clockMs()
+            val elapsed = (now - startMs).coerceAtLeast(0L)
+            if (!settled && request.failOnTimeout) {
+                throw AndroidUseException.waitTimeout(
+                    "Timed out after ${request.timeoutMs}ms waiting for UI to become idle (quietPeriodMs=${request.quietPeriodMs}).",
+                )
+            }
+            return WaitResponse(
+                ok = true,
+                matched = settled,
+                elapsedMs = elapsed,
+                foregroundPackage = tree.packageName,
+                screenHash = hash,
+                marks = marks,
+                timestampMs = now,
+            )
+        }
+
+        // Resolve baseline screen hash for waitForChange.
+        val baselineHash: String? = if (request.waitForChange) {
+            val explicit = request.baselineHash?.trim()?.takeIf { it.isNotEmpty() }
+            val recentPreAction = lastPreActionHash?.takeIf {
+                val age = startMs - lastPreActionTimeMs
+                age in 0L..PRE_ACTION_BASELINE_TTL_MS
+            }
+            explicit ?: recentPreAction ?: run {
+                val initialTree = uiTreeInspector.inspect(UiTreeOptions())
+                lastTree = initialTree
+                UiTreeFingerprint.compute(initialTree)
+            }
+        } else {
+            null
+        }
 
         while (true) {
             sessionManager.requireActiveSessionAndTouch()
+            val seqBeforeInspect = uiChangeTracker.currentSequence()
             val tree = uiTreeInspector.inspect(UiTreeOptions())
-            val matched = UiTreeMatcher.findFirstMatch(
-                roots = tree.roots,
-                text = request.text,
-                resourceId = request.resourceId,
-            )
-            val satisfied = if (request.gone) matched == null else matched != null
+            lastTree = tree
+            val currentHash = UiTreeFingerprint.compute(tree)
+
+            val changeOk = if (request.waitForChange) {
+                currentHash != baselineHash
+            } else {
+                true
+            }
+
+            val packageOk = if (hasPackage) {
+                val currentPkg = tree.packageName
+                val pkgMatches = currentPkg != null && currentPkg.equals(targetPackage, ignoreCase = true)
+                if (request.gone) !pkgMatches else pkgMatches
+            } else {
+                true
+            }
+
+            val matchedNode = if (hasText || hasResId) {
+                UiTreeMatcher.findFirstMatch(
+                    roots = tree.roots,
+                    text = request.text,
+                    resourceId = request.resourceId,
+                )
+            } else {
+                null
+            }
+            val nodeOk = if (hasText || hasResId) {
+                if (request.gone) matchedNode == null else matchedNode != null
+            } else {
+                true
+            }
+
+            val satisfied = changeOk && packageOk && nodeOk
             val now = clockMs()
             val elapsed = (now - startMs).coerceAtLeast(0L)
 
             if (satisfied) {
+                val shouldSettle = (request.waitForChange || request.waitForIdle || hasPackage) &&
+                    request.quietPeriodMs > 0L
+                val finalTree = if (shouldSettle) {
+                    val remaining = (request.timeoutMs - elapsed).coerceAtLeast(0L)
+                    if (remaining > 0L) {
+                        uiChangeTracker.awaitQuiet(
+                            quietPeriodMs = request.quietPeriodMs,
+                            maxWaitMs = minOf(remaining, MAX_QUIET_SETTLE_CAP_MS),
+                        )
+                    }
+                    uiTreeInspector.inspect(UiTreeOptions()).also { lastTree = it }
+                } else {
+                    tree
+                }
+                val finalHash = if (finalTree === tree) currentHash else UiTreeFingerprint.compute(finalTree)
+                val finalNode = if (hasText || hasResId) {
+                    if (request.gone) null else {
+                        if (finalTree === tree) matchedNode
+                        else UiTreeMatcher.findFirstMatch(finalTree.roots, request.text, request.resourceId)
+                            ?: matchedNode
+                    }
+                } else {
+                    null
+                }
+                val marks = if (request.includeMarks) computeAndCacheMarks(finalTree) else null
+                val doneNow = clockMs()
                 return WaitResponse(
                     ok = true,
                     matched = true,
-                    elapsedMs = elapsed,
-                    matchedNode = if (request.gone) null else matched,
-                    timestampMs = now,
+                    elapsedMs = (doneNow - startMs).coerceAtLeast(0L),
+                    matchedNode = finalNode,
+                    screenChanged = if (request.waitForChange) true else null,
+                    foregroundPackage = finalTree.packageName,
+                    screenHash = finalHash,
+                    marks = marks,
+                    timestampMs = doneNow,
                 )
             }
 
             if (elapsed >= request.timeoutMs) {
-                val targetDesc = buildString {
-                    if (hasText) append("text='${request.text}'")
-                    if (hasText && hasResId) append(" and ")
-                    if (hasResId) append("resourceId='${request.resourceId}'")
+                if (!request.failOnTimeout) {
+                    val marks = if (request.includeMarks) computeAndCacheMarks(tree) else null
+                    return WaitResponse(
+                        ok = true,
+                        matched = false,
+                        elapsedMs = elapsed,
+                        matchedNode = null,
+                        screenChanged = if (request.waitForChange) false else null,
+                        foregroundPackage = tree.packageName,
+                        screenHash = currentHash,
+                        marks = marks,
+                        timestampMs = now,
+                    )
                 }
-                val verb = if (request.gone) "disappear" else "appear"
+                val targetDesc = buildList {
+                    if (request.waitForChange) add("screen change")
+                    if (hasPackage) add("packageName='$targetPackage'")
+                    if (hasText) add("text='${request.text}'")
+                    if (hasResId) add("resourceId='${request.resourceId}'")
+                }.joinToString(" and ")
+                val verb = if (request.gone && (hasText || hasResId || hasPackage)) "disappear" else "appear"
+                val suffix = if (request.waitForChange && !hasText && !hasResId && !hasPackage) "" else " to $verb"
                 throw AndroidUseException.waitTimeout(
-                    "Timed out after ${request.timeoutMs}ms waiting for $targetDesc to $verb.",
+                    "Timed out after ${request.timeoutMs}ms waiting for $targetDesc$suffix.",
                 )
             }
 
             val remaining = (request.timeoutMs - elapsed).coerceAtLeast(1L)
-            delay(minOf(request.pollIntervalMs, remaining))
+            val waitSlice = minOf(request.pollIntervalMs, remaining)
+            // Event-driven wakeup: resumes immediately when Android emits an AccessibilityEvent,
+            // or falls back to waitSlice polling if the app updates without emitting one.
+            uiChangeTracker.awaitEventSince(sinceSequence = seqBeforeInspect, timeoutMs = waitSlice)
+        }
+    }
+
+    private fun computeAndCacheMarks(tree: UiTreeResponse): List<UiMark> {
+        val info = deviceInfoProvider.getDeviceInfo()
+        val marks = SetOfMarkSelector.select(
+            tree = tree,
+            displayWidth = info.displayWidth,
+            displayHeight = info.displayHeight,
+        )
+        lastMarks = MarksResponse(
+            count = marks.size,
+            displayWidth = info.displayWidth,
+            displayHeight = info.displayHeight,
+            timestampMs = clockMs(),
+            marks = marks,
+        )
+        return marks
+    }
+
+    private suspend fun recordPreActionBaseline() {
+        val existingTree = lastTree ?: runCatching { uiTreeInspector.inspect(UiTreeOptions()) }.getOrNull()
+        if (existingTree != null) {
+            lastTree = existingTree
+            lastPreActionHash = UiTreeFingerprint.compute(existingTree)
+            lastPreActionTimeMs = clockMs()
         }
     }
 
@@ -702,15 +859,23 @@ class DefaultDeviceController(
     }
 
     /**
-     * Serializes mutating device actions so concurrent agent calls never interleave.
+     * Serializes mutating device actions so concurrent agent calls never interleave,
+     * and records the pre-action screen hash so a subsequent `waitForChange` call can
+     * immediately detect even fast transitions that finished before `/v1/wait` arrived.
      */
     internal suspend fun <T> withActionLock(block: suspend () -> T): T {
-        return actionMutex.withLock { block() }
+        return actionMutex.withLock {
+            recordPreActionBaseline()
+            block()
+        }
     }
 
     companion object {
         private const val MAX_SLEEP_MS: Long = 30_000L
         private const val MAX_WAIT_TIMEOUT_MS: Long = 60_000L
         private const val MAX_POLL_INTERVAL_MS: Long = 2_000L
+        private const val MAX_QUIET_PERIOD_MS: Long = 5_000L
+        private const val MAX_QUIET_SETTLE_CAP_MS: Long = 1_500L
+        private const val PRE_ACTION_BASELINE_TTL_MS: Long = 5_000L
     }
 }

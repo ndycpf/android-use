@@ -351,9 +351,16 @@ data class WaitRequest(
     val durationMs: Long? = null,
     val text: String? = null,
     val resourceId: String? = null,
+    val packageName: String? = null,
+    val waitForChange: Boolean = false,
+    val waitForIdle: Boolean = false,
+    val baselineHash: String? = null,
+    val quietPeriodMs: Long = 150L,
+    val includeMarks: Boolean = false,
+    val failOnTimeout: Boolean = true,
     val gone: Boolean = false,
     val timeoutMs: Long = 10_000L,
-    val pollIntervalMs: Long = 250L,
+    val pollIntervalMs: Long = 200L,
 )
 
 @Serializable
@@ -362,6 +369,10 @@ data class WaitResponse(
     val matched: Boolean,
     val elapsedMs: Long,
     val matchedNode: UiNode? = null,
+    val screenChanged: Boolean? = null,
+    val foregroundPackage: String? = null,
+    val screenHash: String? = null,
+    val marks: List<UiMark>? = null,
     val timestampMs: Long,
 )
 

@@ -128,6 +128,19 @@ class TestTapWithJev(unittest.TestCase):
                 self.assertEqual(req["body"], {"text": "udon", "clearFirst": False, "submit": True})
                 stage["typed"] = True
                 return 200, {"ok": True, "submitted": True}
+            if path == "/v1/wait":
+                self.assertTrue(req["body"]["waitForChange"])
+                self.assertTrue(req["body"]["includeMarks"])
+                return 200, {
+                    "ok": True,
+                    "matched": True,
+                    "screenChanged": True,
+                    "elapsedMs": 185,
+                    "foregroundPackage": "com.google.android.apps.maps",
+                    "marks": [
+                        {"markId": 1, "nodeId": "n1", "text": "Marugame Udon", "clickable": True, "center": {"x": 500, "y": 600}},
+                    ],
+                }
             raise AssertionError(f"Unexpected path: {path}")
 
         def jev_handler(req):
@@ -165,6 +178,7 @@ class TestTapWithJev(unittest.TestCase):
             self.assertEqual(res["selected_mark"], "2")
             self.assertEqual(res["selected_label"], "[2] Search here (editable)")
             self.assertTrue(res["screen_changed"])
+            self.assertEqual(res["transition_wait_ms"], 185)
             self.assertEqual(res["after_foreground_package"], "com.google.android.apps.maps")
             self.assertEqual(res["after_screen_marks"], ["[1] Marugame Udon"])
             self.assertNotIn("recovery_hint", res)
@@ -189,6 +203,9 @@ class TestTapWithJev(unittest.TestCase):
                 }
             if path == "/v1/actions/tap-element":
                 return 200, {"ok": True, "resolvedPoint": {"x": 540, "y": 1200}}
+            if path == "/v1/wait":
+                # Simulate older server without waitForChange to verify fallback path.
+                return 400, {"error": {"code": "INVALID_REQUEST", "message": "Provide durationMs"}}
             raise AssertionError(f"Unexpected path: {path}")
 
         def jev_handler(req):
@@ -262,6 +279,17 @@ class TestTapWithJev(unittest.TestCase):
                     if path == "/v1/actions/tap-element":
                         tapped["done"] = True
                         return 200, {"ok": True, "resolvedPoint": {"x": 980, "y": 100}}
+                    if path == "/v1/wait":
+                        return 200, {
+                            "ok": True,
+                            "matched": True,
+                            "screenChanged": True,
+                            "elapsedMs": 120,
+                            "foregroundPackage": "com.example.camera",
+                            "marks": [
+                                {"markId": 1, "nodeId": "n1", "text": "Flash ON", "clickable": True, "center": {"x": 500, "y": 100}},
+                            ],
+                        }
                     raise AssertionError(f"Unexpected path: {path}")
 
                 calls = {"n": 0}

@@ -12,6 +12,7 @@ import com.androiduse.core.AccessibilityServiceRegistry
 class AndroidUseAccessibilityService : AccessibilityService() {
 
     internal var registry: AccessibilityServiceRegistry = AccessibilityServiceRegistry.default
+    internal var changeTracker: com.androiduse.core.UiChangeTracker = com.androiduse.core.UiChangeTracker.default
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -19,11 +20,28 @@ class AndroidUseAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Populated in later phases (UI state tracking and wait conditions).
+        if (event == null) return
+        val type = event.eventType
+        val pkg = event.packageName?.toString()
+        // Ignore noisy status-bar clock/battery content ticks from SystemUI,
+        // while still forwarding window-state changes (notification shade, dialogs, permission prompts).
+        if (pkg == SYSTEM_UI_PACKAGE && type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            return
+        }
+        changeTracker.recordEvent(
+            eventType = type,
+            packageName = pkg,
+            className = event.className?.toString(),
+            isWindowStateChange = type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+        )
     }
 
     override fun onInterrupt() {
         // No continuous feedback channels to interrupt.
+    }
+
+    companion object {
+        private const val SYSTEM_UI_PACKAGE: String = "com.android.systemui"
     }
 
     override fun onUnbind(intent: Intent?): Boolean {

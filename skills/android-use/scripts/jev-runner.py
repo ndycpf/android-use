@@ -150,6 +150,11 @@ def http_json(
             code="NETWORK_ERROR",
             message=f"{method} {url} failed: {exc.reason}",
         ) from exc
+    except OSError as exc:
+        raise RunnerError(
+            code="NETWORK_ERROR",
+            message=f"{method} {url} failed: {exc}",
+        ) from exc
 
 
 class AndroidUseClient:
@@ -205,6 +210,24 @@ class AndroidUseClient:
         return self.post(
             "/v1/actions/type",
             {"text": text, "clearFirst": clear_first, "submit": submit},
+        )
+
+    def wait_for_change(
+        self,
+        timeout_ms: int = 1500,
+        quiet_period_ms: int = 150,
+        include_marks: bool = True,
+        fail_on_timeout: bool = False,
+    ) -> Dict[str, Any]:
+        return self.post(
+            "/v1/wait",
+            {
+                "waitForChange": True,
+                "timeoutMs": timeout_ms,
+                "quietPeriodMs": quiet_period_ms,
+                "includeMarks": include_marks,
+                "failOnTimeout": fail_on_timeout,
+            },
         )
 
 
@@ -359,8 +382,29 @@ def observe_after_action(
     device: AndroidUseClient,
     before_fp: str,
     settle_ms: int,
-) -> Tuple[Optional[str], List[Dict[str, Any]], bool]:
-    """Wait briefly for UI transition, re-read foreground package + marks, retry once if unchanged."""
+    wait_timeout_ms: int = 1500,
+    quiet_period_ms: int = 150,
+) -> Tuple[Optional[str], List[Dict[str, Any]], bool, Optional[int]]:
+    """Wait smartly for UI transition via server-side AccessibilityEvent `waitForChange`, falling back cleanly."""
+    if wait_timeout_ms > 0:
+        try:
+            wait_res = device.wait_for_change(
+                timeout_ms=wait_timeout_ms,
+                quiet_period_ms=quiet_period_ms,
+                include_marks=True,
+                fail_on_timeout=False,
+            )
+            if isinstance(wait_res.get("marks"), list) and wait_res.get("screenChanged") is not None:
+                return (
+                    wait_res.get("foregroundPackage"),
+                    wait_res.get("marks") or [],
+                    bool(wait_res.get("screenChanged")),
+                    int(wait_res.get("elapsedMs") or 0),
+                )
+        except RunnerError:
+            # Older APK or minimal mock without waitForChange support: fall back to local settle poll.
+            pass
+
     if settle_ms > 0:
         time.sleep(settle_ms / 1000.0)
 
@@ -377,7 +421,7 @@ def observe_after_action(
         after_marks = device.get_marks(refresh=True).get("marks") or []
         after_fp = compute_screen_fingerprint(after_pkg, after_marks)
 
-    return after_pkg, after_marks, (after_fp != before_fp)
+    return after_pkg, after_marks, (after_fp != before_fp), None
 
 
 def tap_with_jev(
@@ -390,6 +434,8 @@ def tap_with_jev(
     vision_fallback: bool = True,
     min_target_confidence: float = 0.45,
     settle_ms: int = 250,
+    wait_timeout_ms: int = 1500,
+    quiet_period_ms: int = 150,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     """Single-shot, loop-proof element picker & tapper powered by Jev."""
@@ -558,19 +604,23 @@ def tap_with_jev(
             device.type_text(text=text_to_type, clear_first=clear_first, submit=submit_text)
             base_out["typed_text"] = text_to_type
 
-        after_pkg, after_marks, screen_changed = observe_after_action(
+        after_pkg, after_marks, screen_changed, transition_ms = observe_after_action(
             device=device,
             before_fp=before_fp,
             settle_ms=settle_ms,
+            wait_timeout_ms=wait_timeout_ms,
+            quiet_period_ms=quiet_period_ms,
         )
         base_out["status"] = "tapped"
         base_out["after_foreground_package"] = after_pkg
         base_out["screen_changed"] = screen_changed
+        if transition_ms is not None:
+            base_out["transition_wait_ms"] = transition_ms
         base_out["after_screen_marks"] = [format_mark_label(m) for m in after_marks[:40]]
         if not screen_changed:
             base_out["recovery_hint"] = (
                 "Screen marks did not visibly change after tap. If this was not a focus-only tap, "
-                "wait briefly and run `check`/`tree`, dismiss any overlay/dialog, or fall back to `screenshot-marked`."
+                "run `wait-change 2500` or `tree`, dismiss any overlay/dialog, or fall back to `screenshot-marked`."
             )
         base_out["total_elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
         return base_out
@@ -600,7 +650,19 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--min-target-confidence", type=float, default=0.45, help="Minimum target_mark confidence (default: 0.45)"
     )
-    parser.add_argument("--settle-ms", type=int, default=250, help="Post-action UI settle pause in ms (default: 250)")
+    parser.add_argument("--settle-ms", type=int, default=250, help="Fallback settle pause in ms (default: 250)")
+    parser.add_argument(
+        "--wait-timeout-ms",
+        type=int,
+        default=1500,
+        help="Server-side event-driven waitForChange timeout in ms (default: 1500; 0 to disable)",
+    )
+    parser.add_argument(
+        "--quiet-ms",
+        type=int,
+        default=150,
+        help="UI quiet settle period in ms after screen change (default: 150)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Select target element without tapping on device")
     return parser.parse_args(argv)
 
@@ -628,6 +690,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             vision_fallback=not args.no_vision,
             min_target_confidence=args.min_target_confidence,
             settle_ms=max(0, args.settle_ms),
+            wait_timeout_ms=max(0, args.wait_timeout_ms),
+            quiet_period_ms=max(0, args.quiet_ms),
             dry_run=args.dry_run,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
