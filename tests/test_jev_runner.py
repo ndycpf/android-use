@@ -23,7 +23,7 @@ spec.loader.exec_module(jev_runner)
 
 
 class MockServer:
-    """Reusable local HTTP server recording requests and returning queued/scripted JSON responses."""
+    """Reusable local HTTP server recording requests and returning scripted JSON responses."""
 
     def __init__(self, handler_fn):
         self.requests: List[Dict[str, Any]] = []
@@ -92,25 +92,25 @@ class TestJevConfig(unittest.TestCase):
         self.assertEqual(ctx.exception.exit_code, 2)
 
 
-class TestJevRunnerLoop(unittest.TestCase):
-    def test_text_first_tap_and_type_loop_takes_zero_screenshots(self):
-        screen_stage = {"step": 0}
+class TestTapWithJev(unittest.TestCase):
+    def test_single_shot_tap_and_type_takes_zero_screenshots_and_reports_screen_change(self):
+        stage = {"typed": False}
 
         def android_handler(req):
             path = req["path"]
             if path == "/v1/session":
                 return 200, {"active": True}
             if path == "/v1/device/info":
-                return 200, {"foregroundPackage": "com.example.search", "deviceLocked": False}
+                return 200, {"foregroundPackage": "com.google.android.apps.maps", "deviceLocked": False}
             if path.startswith("/v1/screen/marks"):
-                if screen_stage["step"] == 0:
+                if not stage["typed"]:
                     return 200, {
                         "count": 2,
                         "displayWidth": 1080,
                         "displayHeight": 2400,
                         "marks": [
-                            {"markId": 1, "nodeId": "n1", "text": "Search", "editable": True, "center": {"x": 500, "y": 150}},
-                            {"markId": 2, "nodeId": "n2", "text": "Settings", "clickable": True, "center": {"x": 950, "y": 150}},
+                            {"markId": 1, "nodeId": "n1", "text": "Ask Maps", "clickable": True, "center": {"x": 200, "y": 200}},
+                            {"markId": 2, "nodeId": "n2", "text": "Search here", "editable": True, "center": {"x": 500, "y": 150}},
                         ],
                     }
                 return 200, {
@@ -118,39 +118,28 @@ class TestJevRunnerLoop(unittest.TestCase):
                     "displayWidth": 1080,
                     "displayHeight": 2400,
                     "marks": [
-                        {"markId": 1, "nodeId": "n1", "text": "Tokyo weather: 22C", "clickable": True, "center": {"x": 500, "y": 400}},
+                        {"markId": 1, "nodeId": "n1", "text": "Marugame Udon", "clickable": True, "center": {"x": 500, "y": 600}},
                     ],
                 }
             if path == "/v1/actions/tap-element":
+                self.assertEqual(req["body"], {"markId": 2})
                 return 200, {"ok": True, "resolvedPoint": {"x": 500, "y": 150}}
             if path == "/v1/actions/type":
-                screen_stage["step"] = 1
+                self.assertEqual(req["body"], {"text": "udon", "clearFirst": False, "submit": True})
+                stage["typed"] = True
                 return 200, {"ok": True, "submitted": True}
-            raise AssertionError(f"Unexpected Android path: {path}")
-
-        jev_calls = {"n": 0}
+            raise AssertionError(f"Unexpected path: {path}")
 
         def jev_handler(req):
-            jev_calls["n"] += 1
-            if jev_calls["n"] == 1:
-                self.assertIn("type_text", req["body"]["questions"]["operation"]["criteria"])
-                return 200, {
-                    "model": "jev-1.14.0",
-                    "answers": {
-                        "operation": {"type": "choice", "choice": "type_text", "probabilities": {"type_text": 0.94}, "confidence": 0.92},
-                        "target_mark": {"type": "choice", "choice": "1", "probabilities": {"1": 0.96}, "confidence": 0.95},
-                        "need_vision": {"type": "noul", "noul": 0.05},
-                    },
-                    "usage": {"input_tokens": 210, "output_tokens": 0, "cost": 0.000009},
-                }
+            self.assertNotIn("operation", req["body"]["questions"])
+            self.assertIn("target_mark", req["body"]["questions"])
             return 200, {
                 "model": "jev-1.14.0",
                 "answers": {
-                    "operation": {"type": "choice", "choice": "done", "probabilities": {"done": 0.98}, "confidence": 0.97},
-                    "target_mark": {"type": "choice", "choice": "none", "probabilities": {"none": 0.95}, "confidence": 0.94},
-                    "need_vision": {"type": "noul", "noul": 0.01},
+                    "target_mark": {"type": "choice", "choice": "2", "probabilities": {"2": 0.95}, "confidence": 0.93},
+                    "need_vision": {"type": "noul", "noul": 0.04},
                 },
-                "usage": {"input_tokens": 180, "output_tokens": 0, "cost": 0.000008},
+                "usage": {"input_tokens": 160, "cost": 0.000007},
             }
 
         with MockServer(android_handler) as android_srv, MockServer(jev_handler) as jev_srv:
@@ -158,30 +147,84 @@ class TestJevRunnerLoop(unittest.TestCase):
             jev = jev_runner.JevClient(
                 jev_runner.JevConfig(
                     provider="typesafe",
-                    api_key="ts-secret",
+                    api_key="ts-key",
                     endpoint=f"{jev_srv.url}/v1/systemone",
                     model="jev-latest",
                 )
             )
-            result = jev_runner.run_jev_loop(
-                goal="Search Tokyo weather",
+            res = jev_runner.tap_with_jev(
+                target_description="Search bar (do not tap Ask Maps)",
                 device=device,
                 jev=jev,
-                text_to_type="Tokyo weather",
+                text_to_type="udon",
                 submit_text=True,
                 settle_ms=0,
             )
 
-            self.assertEqual(result["status"], "done")
-            self.assertEqual(result["step_count"], 2)
-            self.assertEqual(result["usage"]["input_tokens"], 390)
-            screenshot_calls = [r for r in android_srv.requests if "/screenshot" in r["path"]]
-            self.assertEqual(len(screenshot_calls), 0)
+            self.assertEqual(res["status"], "tapped")
+            self.assertEqual(res["selected_mark"], "2")
+            self.assertEqual(res["selected_label"], "[2] Search here (editable)")
+            self.assertTrue(res["screen_changed"])
+            self.assertEqual(res["after_foreground_package"], "com.google.android.apps.maps")
+            self.assertEqual(res["after_screen_marks"], ["[1] Marugame Udon"])
+            self.assertNotIn("recovery_hint", res)
+            self.assertEqual(len(jev_srv.requests), 1)
+            self.assertEqual([r for r in android_srv.requests if "/screenshot" in r["path"]], [])
 
-    def test_vision_fallback_triggers_on_need_vision_for_typesafe_and_openrouter(self):
+    def test_no_screen_change_sets_screen_changed_false_and_recovery_hint(self):
+        def android_handler(req):
+            path = req["path"]
+            if path == "/v1/session":
+                return 200, {"active": True}
+            if path == "/v1/device/info":
+                return 200, {"foregroundPackage": "com.example.app", "deviceLocked": False}
+            if path.startswith("/v1/screen/marks"):
+                return 200, {
+                    "count": 1,
+                    "displayWidth": 1080,
+                    "displayHeight": 2400,
+                    "marks": [
+                        {"markId": 1, "nodeId": "n1", "text": "Submit", "clickable": True, "center": {"x": 540, "y": 1200}},
+                    ],
+                }
+            if path == "/v1/actions/tap-element":
+                return 200, {"ok": True, "resolvedPoint": {"x": 540, "y": 1200}}
+            raise AssertionError(f"Unexpected path: {path}")
+
+        def jev_handler(req):
+            return 200, {
+                "model": "jev-1.14.0",
+                "answers": {
+                    "target_mark": {"type": "choice", "choice": "1", "probabilities": {"1": 0.92}, "confidence": 0.90},
+                    "need_vision": {"type": "noul", "noul": 0.05},
+                },
+                "usage": {"input_tokens": 110},
+            }
+
+        with MockServer(android_handler) as android_srv, MockServer(jev_handler) as jev_srv:
+            device = jev_runner.AndroidUseClient(android_srv.url)
+            jev = jev_runner.JevClient(
+                jev_runner.JevConfig(
+                    provider="typesafe",
+                    api_key="test-key",
+                    endpoint=f"{jev_srv.url}/v1/systemone",
+                    model="jev-latest",
+                )
+            )
+            res = jev_runner.tap_with_jev(
+                target_description="Submit button",
+                device=device,
+                jev=jev,
+                settle_ms=0,
+            )
+            self.assertEqual(res["status"], "tapped")
+            self.assertFalse(res["screen_changed"])
+            self.assertIn("recovery_hint", res)
+
+    def test_vision_fallback_works_for_typesafe_and_openrouter(self):
         for provider in ("typesafe", "openrouter"):
             with self.subTest(provider=provider):
-                stage = {"done": False}
+                tapped = {"done": False}
 
                 def android_handler(req):
                     path = req["path"]
@@ -190,7 +233,7 @@ class TestJevRunnerLoop(unittest.TestCase):
                     if path == "/v1/device/info":
                         return 200, {"foregroundPackage": "com.example.camera", "deviceLocked": False}
                     if path.startswith("/v1/screen/marks"):
-                        if not stage["done"]:
+                        if not tapped["done"]:
                             return 200, {
                                 "count": 2,
                                 "displayWidth": 1080,
@@ -217,7 +260,7 @@ class TestJevRunnerLoop(unittest.TestCase):
                             ],
                         }
                     if path == "/v1/actions/tap-element":
-                        stage["done"] = True
+                        tapped["done"] = True
                         return 200, {"ok": True, "resolvedPoint": {"x": 980, "y": 100}}
                     raise AssertionError(f"Unexpected path: {path}")
 
@@ -226,40 +269,26 @@ class TestJevRunnerLoop(unittest.TestCase):
                 def jev_handler(req):
                     calls["n"] += 1
                     if calls["n"] == 1:
-                        # Text-only pass requests vision fallback.
                         return 200, {
                             "model": "jev-1.14.0",
                             "answers": {
-                                "operation": {"type": "choice", "choice": "tap_mark", "probabilities": {"tap_mark": 0.55}, "confidence": 0.45},
-                                "target_mark": {"type": "choice", "choice": "1", "probabilities": {"1": 0.50}, "confidence": 0.30},
-                                "need_vision": {"type": "noul", "noul": 0.88},
+                                "target_mark": {"type": "choice", "choice": "1", "probabilities": {"1": 0.45}, "confidence": 0.25},
+                                "need_vision": {"type": "noul", "noul": 0.90},
                             },
                             "usage": {"input_tokens": 120},
                         }
-                    if calls["n"] == 2:
-                        # Verify multimodal payload shape per provider.
-                        if provider == "typesafe":
-                            self.assertEqual(req["headers"].get("typesafe-danger-zone-images"), "true")
-                            self.assertTrue(req["body"].get("assets"))
-                        else:
-                            self.assertIsInstance(req["body"]["state"], list)
-                            self.assertEqual(req["body"]["state"][1]["type"], "image_url")
-                        return 200, {
-                            "model": "jev-1.14.0",
-                            "answers": {
-                                "operation": {"type": "choice", "choice": "tap_mark", "probabilities": {"tap_mark": 0.95}, "confidence": 0.94},
-                                "target_mark": {"type": "choice", "choice": "2", "probabilities": {"2": 0.93}, "confidence": 0.91},
-                            },
-                            "usage": {"input_tokens": 500},
-                        }
+                    if provider == "typesafe":
+                        self.assertEqual(req["headers"].get("typesafe-danger-zone-images"), "true")
+                        self.assertTrue(req["body"].get("assets"))
+                    else:
+                        self.assertIsInstance(req["body"]["state"], list)
+                        self.assertEqual(req["body"]["state"][1]["type"], "image_url")
                     return 200, {
                         "model": "jev-1.14.0",
                         "answers": {
-                            "operation": {"type": "choice", "choice": "done", "probabilities": {"done": 0.99}, "confidence": 0.99},
-                            "target_mark": {"type": "choice", "choice": "none", "probabilities": {"none": 0.99}, "confidence": 0.99},
-                            "need_vision": {"type": "noul", "noul": 0.02},
+                            "target_mark": {"type": "choice", "choice": "2", "probabilities": {"2": 0.94}, "confidence": 0.92},
                         },
-                        "usage": {"input_tokens": 110},
+                        "usage": {"input_tokens": 500},
                     }
 
                 with MockServer(android_handler) as android_srv, MockServer(jev_handler) as jev_srv:
@@ -272,17 +301,18 @@ class TestJevRunnerLoop(unittest.TestCase):
                             model="jev-latest" if provider == "typesafe" else "typesafe/jev-1.14",
                         )
                     )
-                    res = jev_runner.run_jev_loop(
-                        goal="Turn flash on",
+                    res = jev_runner.tap_with_jev(
+                        target_description="Flash icon",
                         device=device,
                         jev=jev,
                         settle_ms=0,
                     )
-                    self.assertEqual(res["status"], "done")
-                    self.assertTrue(res["steps"][0]["used_vision"])
-                    self.assertEqual(res["steps"][0]["target_mark"], "2")
+                    self.assertEqual(res["status"], "tapped")
+                    self.assertTrue(res["used_vision"])
+                    self.assertTrue(res["screen_changed"])
+                    self.assertEqual(res["selected_mark"], "2")
 
-    def test_stuck_repeated_action_escalates_cleanly(self):
+    def test_not_found_returns_recovery_hint_without_tapping(self):
         def android_handler(req):
             path = req["path"]
             if path == "/v1/session":
@@ -295,141 +325,19 @@ class TestJevRunnerLoop(unittest.TestCase):
                     "displayWidth": 1080,
                     "displayHeight": 2400,
                     "marks": [
-                        {"markId": 1, "nodeId": "n1", "text": "Retry", "clickable": True, "center": {"x": 540, "y": 1200}},
+                        {"markId": 1, "nodeId": "n1", "text": "Cancel", "clickable": True, "center": {"x": 200, "y": 200}},
                     ],
                 }
-            if path == "/v1/actions/tap-element":
-                return 200, {"ok": True, "resolvedPoint": {"x": 540, "y": 1200}}
-            raise AssertionError(f"Unexpected path: {path}")
+            raise AssertionError(f"Should not have tapped: {path}")
 
         def jev_handler(req):
             return 200, {
                 "model": "jev-1.14.0",
                 "answers": {
-                    "operation": {"type": "choice", "choice": "tap_mark", "probabilities": {"tap_mark": 0.9}, "confidence": 0.9},
-                    "target_mark": {"type": "choice", "choice": "1", "probabilities": {"1": 0.9}, "confidence": 0.9},
+                    "target_mark": {"type": "choice", "choice": "none", "probabilities": {"none": 0.95}, "confidence": 0.94},
                     "need_vision": {"type": "noul", "noul": 0.05},
                 },
-                "usage": {"input_tokens": 100},
-            }
-
-        with MockServer(android_handler) as android_srv, MockServer(jev_handler) as jev_srv:
-            device = jev_runner.AndroidUseClient(android_srv.url)
-            jev = jev_runner.JevClient(
-                jev_runner.JevConfig(
-                    provider="typesafe",
-                    api_key="test-key",
-                    endpoint=f"{jev_srv.url}/v1/systemone",
-                    model="jev-latest",
-                )
-            )
-            res = jev_runner.run_jev_loop(
-                goal="Tap Retry until loaded",
-                device=device,
-                jev=jev,
-                max_steps=5,
-                settle_ms=0,
-            )
-            self.assertEqual(res["status"], "escalate")
-            self.assertEqual(res["reason"], "stuck_repeat_action:tap_mark:1")
-            self.assertEqual(res["step_count"], 2)
-
-    def test_oscillation_cycle_a_to_b_to_a_escalates(self):
-        state = {"screen": "A"}
-
-        def android_handler(req):
-            path = req["path"]
-            if path == "/v1/session":
-                return 200, {"active": True}
-            if path == "/v1/device/info":
-                return 200, {"foregroundPackage": "com.example.maps", "deviceLocked": False}
-            if path.startswith("/v1/screen/marks"):
-                label = "Ask Maps" if state["screen"] == "A" else "Back to list"
-                return 200, {
-                    "count": 1,
-                    "displayWidth": 1080,
-                    "displayHeight": 2400,
-                    "marks": [
-                        {"markId": 1, "nodeId": "n1", "text": label, "clickable": True, "center": {"x": 540, "y": 500}},
-                    ],
-                }
-            if path == "/v1/actions/tap-element":
-                state["screen"] = "B" if state["screen"] == "A" else "A"
-                return 200, {"ok": True, "resolvedPoint": {"x": 540, "y": 500}}
-            raise AssertionError(f"Unexpected path: {path}")
-
-        def jev_handler(req):
-            return 200, {
-                "model": "jev-1.14.0",
-                "answers": {
-                    "operation": {"type": "choice", "choice": "tap_mark", "probabilities": {"tap_mark": 0.9}, "confidence": 0.9},
-                    "target_mark": {"type": "choice", "choice": "1", "probabilities": {"1": 0.9}, "confidence": 0.9},
-                    "need_vision": {"type": "noul", "noul": 0.05},
-                },
-                "usage": {"input_tokens": 100},
-            }
-
-        with MockServer(android_handler) as android_srv, MockServer(jev_handler) as jev_srv:
-            device = jev_runner.AndroidUseClient(android_srv.url)
-            jev = jev_runner.JevClient(
-                jev_runner.JevConfig(
-                    provider="typesafe",
-                    api_key="test-key",
-                    endpoint=f"{jev_srv.url}/v1/systemone",
-                    model="jev-latest",
-                )
-            )
-            res = jev_runner.run_jev_loop(goal="Open restaurant", device=device, jev=jev, max_steps=6, settle_ms=0)
-            self.assertEqual(res["status"], "escalate")
-            self.assertEqual(res["reason"], "stuck_repeat_action:tap_mark:1")
-            # Step 1 (A->B), Step 2 (B->A), Step 3 sees (A, tap_mark:1) already visited -> escalates immediately.
-            self.assertEqual(res["step_count"], 3)
-
-    def test_single_shot_tap_with_jev_taps_once_and_returns_after_marks(self):
-        tapped = {"done": False}
-
-        def android_handler(req):
-            path = req["path"]
-            if path == "/v1/session":
-                return 200, {"active": True}
-            if path == "/v1/device/info":
-                return 200, {"foregroundPackage": "com.google.android.apps.maps", "deviceLocked": False}
-            if path.startswith("/v1/screen/marks"):
-                if not tapped["done"]:
-                    return 200, {
-                        "count": 2,
-                        "displayWidth": 1080,
-                        "displayHeight": 2400,
-                        "marks": [
-                            {"markId": 1, "nodeId": "n1", "text": "Ask Maps", "clickable": True, "center": {"x": 200, "y": 200}},
-                            {"markId": 2, "nodeId": "n2", "text": "Marugame Udon", "clickable": True, "center": {"x": 500, "y": 600}},
-                        ],
-                    }
-                return 200, {
-                    "count": 1,
-                    "displayWidth": 1080,
-                    "displayHeight": 2400,
-                    "marks": [
-                        {"markId": 1, "nodeId": "n1", "text": "Directions", "clickable": True, "center": {"x": 300, "y": 1400}},
-                    ],
-                }
-            if path == "/v1/actions/tap-element":
-                self.assertEqual(req["body"], {"markId": 2})
-                tapped["done"] = True
-                return 200, {"ok": True, "resolvedPoint": {"x": 500, "y": 600}}
-            raise AssertionError(f"Unexpected path: {path}")
-
-        def jev_handler(req):
-            # Single-shot asks only target_mark + need_vision (no operation loop).
-            self.assertNotIn("operation", req["body"]["questions"])
-            self.assertIn("target_mark", req["body"]["questions"])
-            return 200, {
-                "model": "jev-1.14.0",
-                "answers": {
-                    "target_mark": {"type": "choice", "choice": "2", "probabilities": {"2": 0.94}, "confidence": 0.91},
-                    "need_vision": {"type": "noul", "noul": 0.04},
-                },
-                "usage": {"input_tokens": 140, "cost": 0.000006},
+                "usage": {"input_tokens": 90},
             }
 
         with MockServer(android_handler) as android_srv, MockServer(jev_handler) as jev_srv:
@@ -443,16 +351,14 @@ class TestJevRunnerLoop(unittest.TestCase):
                 )
             )
             res = jev_runner.tap_with_jev(
-                target_description="Tap the first udon restaurant (do not tap Ask Maps)",
+                target_description="Confirm button",
                 device=device,
                 jev=jev,
                 settle_ms=0,
             )
-            self.assertEqual(res["status"], "tapped")
-            self.assertEqual(res["selected_mark"], "2")
-            self.assertEqual(res["selected_label"], "[2] Marugame Udon")
-            self.assertEqual(res["after_screen_marks"], ["[1] Directions"])
-            self.assertEqual(len(jev_srv.requests), 1)
+            self.assertEqual(res["status"], "not_found")
+            self.assertEqual(res["reason"], "no_matching_element")
+            self.assertIn("recovery_hint", res)
 
 
 if __name__ == "__main__":

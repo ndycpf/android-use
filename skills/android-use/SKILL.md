@@ -51,23 +51,29 @@ Check `screenOn` and `deviceLocked` in the `session-start` / `info` response:
 2. **Prefer launching apps directly** instead of swiping through launcher pages:
    - Run `scripts/android-use.sh apps <query>` to find the `packageName`.
    - Run `scripts/android-use.sh launch <packageName>` (or `launch-uri <uri>`).
-3. **Operate text-first — do NOT take screenshots by default**:
+3. **Strict 1–2 step cap across ALL flows (never chain blind actions)**:
+   - Execute **at most 1–2 actions** before re-observing the live screen state (`check` / `marks` / `tree` / `tap-jev` response).
+   - Never fire 3+ blind taps/swipes/types in one turn — popups, slow loading, focus changes, or unexpected app switches immediately invalidate later steps.
+   - The only valid 2-step pair without re-observing is **tap an editable field → `type`** (or `tap-jev ... --text "..." --submit`), and even then re-check right after.
+4. **Operate text-first — do NOT take screenshots by default**:
    - Screenshots trigger Android OS rate limits (0.3–1s), image encoding/transfer overhead, and extra vision tokens. Treat screenshots **strictly as a fallback**.
-   - **Default fast loop (text-only, ~30ms, no rate limit)**:
-     - Run `scripts/android-use.sh marks` to get a compact numbered list of all live interactive elements (`[1] "Search" (editable)`, `[2] "Wi-Fi" (unchecked)`, … plus `unlabeled` count).
-     - Run `scripts/android-use.sh tree` when you also need non-interactive screen text (messages, prices, status labels).
-     - Tap directly with `tap-mark <id>`, `tap-text "<label>"`, `tap-id "<resourceId>"`, or `tap-node <nodeId>`. (`tap-text` / `tap-id` re-query the **live** UI tree right before tapping and clip bounds to the visible screen.)
+   - **Default fast loop (text-only, ~30–50ms, no rate limit)**:
+     - Run `scripts/android-use.sh check` to get `foregroundPackage`, lock state, and a compact numbered list of live interactive elements (`[1] "Search" (editable)`, `[2] "Wi-Fi" (unchecked)`, … plus `unlabeled` count) in one command.
+     - Run `scripts/android-use.sh tree` when you also need non-interactive text (messages, prices, dialog body, error banners).
+     - Act with `tap-mark <id>`, `tap-text "<label>"`, `tap-id "<resourceId>"`, `tap-node <nodeId>`, or optional 1-shot `tap-jev` (when a semantic description is cleaner than raw labels).
    - **Fallback 1 — Set-of-Mark visual tap (`screenshot-marked` + `tap-mark <id>`)**:
-     - Use **only** when `marks` shows unlabeled icon buttons you cannot disambiguate by text (`unlabeled > 0`), the layout is visually ambiguous, or repeated actions did not change the UI state.
+     - Use **only** when `check`/`marks` shows unlabeled icon buttons you cannot disambiguate (`unlabeled > 0`), the layout is visually ambiguous, or a text-only tap failed/produced `screen_changed: false`.
      - Run `scripts/android-use.sh screenshot-marked /tmp/marked.jpg`, visually pick the badge number, and run `tap-mark <markId>`.
    - **Fallback 2 — Raw coordinate tap (`screenshot` + `tap-image` / `normalized`)**:
-     - Use **only** when `marks` / `tree` cannot see the target at all (Canvas, games, maps, custom WebView) or when inspecting visual content (photos, colors, charts).
+     - Use **only** when `marks`/`tree` cannot see the target at all (Canvas, games, maps, custom WebView) or when inspecting visual content (photos, colors, charts).
      - Check the `X-Image-Width` / `X-Image-Height` headers (downscaled to `maxDimension=1280` by default). **Never** pass scaled screenshot pixels into `tap <x> <y> pixel` — always use `tap-image <x> <y> <imageWidth> <imageHeight>` or `tap <x> <y> normalized` (`0.0..1.0`).
-4. **Focus before typing**:
-   - Always tap an editable field (`editable: true`, via `tap-mark`, `tap-text`, or `tap-node`) before calling `type`, `clear`, or `ime`.
-   - If `type` returns `409 NO_FOCUSED_INPUT`, tap the input field again and retry.
-5. **Wait on UI transitions**:
-   - Prefer `wait-text "<expected>" 5000` or `wait-gone "<spinner>" 5000` over fixed sleeps.
+5. **Verify state & recover cleanly when an action does not work**:
+   - After every 1–2 actions, verify the phone actually moved to the expected screen (`check` or `tap-jev`'s `screen_changed` + `after_foreground_package` + `after_screen_marks`).
+   - **Recovery Ladder** (when an action fails, hits the wrong screen, or `screen_changed: false`):
+     1. **Settle & re-check**: Wait briefly (`wait-sleep 500` or `wait-text "<expected>" 3000`) and run `check` before retrying — animations and network fetches often just needed a beat.
+     2. **Inspect full `tree` & clear blockers**: Read `tree` for unexpected dialogs, permission prompts, snackbars, or focus errors (`409 NO_FOCUSED_INPUT`). Dismiss stray popups (`key BACK` or tap dismiss), or `swipe` once if the target is off-screen.
+     3. **Escalate to visual Set-of-Mark**: If a text tap or `tap-jev` misses or produces `screen_changed: false` once after settling, switch immediately to `screenshot-marked /tmp/marked.jpg` → `tap-mark <id>` instead of repeating the same failing command.
+     4. **Coordinate fallback or pause & report**: If the same step fails twice even with visual fallback (e.g. Canvas/WebView or blocked system UI), try `screenshot` + `tap-image` once, or stop and report the exact stuck state (`foregroundPackage` + visible marks) to the user. Never loop endlessly.
 6. **End the session when done** (`scripts/android-use.sh session-end`) so the overlay disappears and normal screen sleep resumes.
 7. **Safety guardrails**:
    - Ask the user for explicit confirmation before irreversible or sensitive actions (sending emails/messages, making payments or purchases, deleting data, modifying account/security settings, or entering passwords/2FA codes).
@@ -84,6 +90,7 @@ scripts/android-use.sh session-start [label] [idleTimeoutMs]
 scripts/android-use.sh session-end
 
 # Observation — text-first (default, fast, no rate limit)
+scripts/android-use.sh check
 scripts/android-use.sh marks [refresh:true|false] [compact|json]
 scripts/android-use.sh tree [maxDepth] [maxNodes]
 scripts/android-use.sh state [includeScreenshot:true|false] [annotate:true|false]
@@ -97,6 +104,7 @@ scripts/android-use.sh tap-mark <markId>
 scripts/android-use.sh tap-text <text> [index] [exact:true|false]
 scripts/android-use.sh tap-id <resourceId> [index]
 scripts/android-use.sh tap-node <nodeId>
+scripts/android-use.sh tap-jev "<1 element on current screen>" [--text "<input>"] [--submit] [--no-vision]
 
 # Raw coordinate & navigation actions (fallback / gestures, session required)
 scripts/android-use.sh tap <x> <y> [pixel|normalized]
@@ -117,56 +125,37 @@ scripts/android-use.sh launch-uri <uri>
 scripts/android-use.sh wait-sleep [durationMs]
 scripts/android-use.sh wait-text <text> [timeoutMs]
 scripts/android-use.sh wait-gone <text> [timeoutMs]
-
-# Optional Jev helpers (requires TYPESAFE_API_KEY or OPENROUTER_API_KEY)
-scripts/android-use.sh tap-jev "<element to tap on current screen>" [--text "<input>"] [--submit] [--no-vision]
-scripts/android-use.sh run-jev "<1-screen micro-goal>" [--max-steps 2] [--text "<input>"] [--submit] [--no-vision]
 ```
 
-## Optional Jev Helpers (`tap-jev` / `run-jev`)
+## Optional 1-Shot Jev Tap (`tap-jev`)
 
-If `TYPESAFE_API_KEY` (direct TypeSafe `/v1/systemone`, default `jev-latest`) or `OPENROUTER_API_KEY` (OpenRouter `/api/alpha/decisions`, default `typesafe/jev-1.14`) is set in the environment, you can offload fast element selection (~150–300ms) to Jev.
+If `TYPESAFE_API_KEY` (direct TypeSafe `/v1/systemone`, default `jev-latest`) or `OPENROUTER_API_KEY` (OpenRouter `/api/alpha/decisions`, default `typesafe/jev-1.14`) is set, you can use `tap-jev` for **strictly 1-shot semantic element picking** on the current screen (~150–300ms, zero loop risk).
 
-### Division of Responsibility (Preventing Infinite Loops)
-
-**Do NOT hand Jev long multi-step loops.** Because Jev is a stateless System-1 classifier, letting it control scrolling, backtracking, and multi-screen navigation often causes oscillation or infinite loops.
-
-- **Main agent (you) owns the overall flow**: launching apps, deciding which screen to go to, scrolling when an item isn't visible, running `tap-text` when the exact label is already known, and verifying completion.
-- **Jev owns 1-shot semantic picking on the current screen (`tap-jev`, recommended)**: pick and tap **one** matching element on the current screen (e.g. *"the first non-ad restaurant card"*, *"the share icon"*, *"the search bar"*) and immediately return `after_screen_marks` so you stay in control with zero loop risk.
-- Only use `run-jev` for strictly **1–2 step** micro-transitions (`--max-steps 2`) on a single target screen.
+- **Main agent (you) owns the entire workflow**: launching apps, scrolling, verifying screen transitions, deciding completion, and running recovery.
+- **Jev ONLY picks and taps 1 element on the current screen** (optionally typing pre-supplied `--text` into that tapped field) and returns `screen_changed`, `after_foreground_package`, `after_screen_marks`, and `recovery_hint`.
 
 ```bash
-# Recommended: 1-shot loop-proof pick & tap (returns after_screen_marks)
-scripts/android-use.sh tap-jev "Tap the search bar (not 'Ask Maps')" --text "udon" --submit
-scripts/android-use.sh tap-jev "Tap the first udon restaurant result (not 'Ask Maps', not sponsored ad)"
-
-# Optional 1-2 step micro-loop (keep max-steps small)
-scripts/android-use.sh run-jev "Currently on Google Maps search results for udon. Open the first restaurant detail page. Done when the place name and 'Directions' button are visible. Do not tap 'Ask Maps'." --max-steps 2
+scripts/android-use.sh tap-jev "Search bar on Google Maps home (do not tap 'Ask Maps')" --text "udon" --submit
+scripts/android-use.sh tap-jev "First udon restaurant result on search list (do not tap 'Ask Maps' or sponsored ads)"
 ```
 
-### Goal Prompting Tips for Jev
-
-1. **Prefer `tap-jev` (1 action)**: Ask Jev only *"pick and tap the 1 element on this screen matching X"*, and handle scrolling / next-step planning yourself.
-2. **1 goal = 1 target screen** (if using `run-jev`): Never bundle multiple stages (*"search and open 1st item"*); split into one screen transition per call (`--max-steps 2`).
-3. **State explicit negative constraints**: Call out distractors to ignore (*"Do NOT tap 'Ask Maps'"*, *"Do NOT tap sponsored ads"*).
-4. **State the current screen & concrete completion markers**: Prefix with *"Currently on …"* and (for `run-jev`) specify visible markers like *"Done when 'Directions' button is visible"*.
-
+- **Prompting tips**: State the current screen + exact target + explicit negative constraints (*"do not tap 'Ask Maps'"*).
 - Runs text-first using live `marks` and falls back to `screenshot?annotate=true` only when unlabeled icons or low confidence require vision (disable with `--no-vision`).
 - Optional overrides: `JEV_PROVIDER=typesafe|openrouter`, `JEV_MODEL=<model-id>`, `JEV_ENDPOINT=<custom-url>`.
-- Exit codes & handoff:
-  - `0` (`status: "tapped"` / `"done"`): action succeeded; inspect `after_screen_marks` / `last_screen_marks`.
-  - `10` (`status: "not_found"` / `"escalate"` / `"max_steps"`): element absent, low confidence, or cycle detected — scroll or handle directly using returned `screen_marks`.
-  - `2` (`code: "JEV_NOT_CONFIGURED"`): no Jev API key is set — continue normally with `marks` / `tree` / `tap-mark`.
+- Exit codes:
+  - `0` (`status: "tapped"` / `"dry_run"`): check `screen_changed` and `after_screen_marks`; if `screen_changed == false`, follow the Recovery Ladder.
+  - `10` (`status: "not_found"` / `"escalate"`): element absent or low confidence — inspect returned `screen_marks`, scroll, or use `screenshot-marked`.
+  - `2` (`code: "JEV_NOT_CONFIGURED"`): no Jev API key set — continue normally with `check` / `tap-mark` / `tap-text`.
 
 ## Error Recovery
 
 | HTTP | Error Code | Meaning / Recovery |
 | --- | --- | --- |
 | `401` | `UNAUTHORIZED` | `ANDROID_USE_TOKEN` is missing or rotated; update token from the app UI. |
-| `404` | `ELEMENT_NOT_FOUND` | Selector / `nodeId` / `markId` did not match a visible element; refresh `tree` or `screenshot-marked`, scroll into view, or fall back to `tap-image`. |
+| `404` | `ELEMENT_NOT_FOUND` | Selector / `nodeId` / `markId` did not match a visible element; run `check` or `tree`, scroll once, or switch to `screenshot-marked`. |
 | `404` | `APP_NOT_FOUND` | Package is not launchable or URI has no handler; verify with `apps <query>`. |
-| `408` | `WAIT_TIMEOUT` | Expected UI element did not appear/disappear in time; inspect `tree` or `screenshot-marked`. |
+| `408` | `WAIT_TIMEOUT` | Expected UI element did not appear/disappear in time; run `check`/`tree` or `screenshot-marked` to inspect actual state. |
 | `409` | `SESSION_NOT_ACTIVE` | No active session (or session timed out); run `session-start` first. |
-| `409` | `NO_FOCUSED_INPUT` | No focused editable field; tap the input box before calling `type`/`clear`/`ime`. |
-| `429` | `SCREENSHOT_RATE_LIMITED` | Android throttled consecutive `takeScreenshot()` calls; wait ~500ms or use `allowCachedMs`. |
+| `409` | `NO_FOCUSED_INPUT` | No focused editable field; tap the editable field first, verify focus/keyboard, then retry `type`/`clear`/`ime`. |
+| `429` | `SCREENSHOT_RATE_LIMITED` | Android throttled consecutive `takeScreenshot()` calls; prefer `check`/`marks`, wait ~500ms, or use `allowCachedMs`. |
 | `503` | `ACCESSIBILITY_NOT_CONNECTED` | Accessibility Service is disabled on the device; ask the user to enable it in Android Settings. |

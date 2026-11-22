@@ -69,6 +69,7 @@ Commands:
   session-end                                    End active session (clears overlay & restores sleep)
   screenshot [out.jpg] [jpeg|png] [maxDimension] Capture binary screenshot to file (session required)
   screenshot-marked [out.jpg] [jpeg|png] [maxDim] Fallback: Set-of-Mark numbered screenshot + marks legend
+  check                                          Get foreground package + lock state + live compact marks (fast)
   marks [refresh:true|false] [compact|json]      Get live interactive elements list (default: true compact, fast)
   tree [maxDepth] [maxNodes]                     Get normalized UI accessibility tree (session required)
   state [includeScreenshot:true|false] [annotate] Get combined device info, UI tree, optional screenshot/marks
@@ -76,6 +77,7 @@ Commands:
   tap-id <resourceId> [index]                    Tap element by live resourceId match
   tap-node <nodeId>                              Tap element by nodeId from latest tree (e.g. n12)
   tap-mark <markId>                              Tap numbered element from latest marks / screenshot-marked
+  tap-jev <description> [flags...]               Optional 1-shot Jev semantic tap (needs TYPESAFE_API_KEY or OPENROUTER_API_KEY)
   tap <x> <y> [pixel|normalized]                 Tap screen coordinate (fallback for canvas/custom UI)
   tap-image <x> <y> <imageWidth> <imageHeight>   Tap coordinate in screenshot image space
   long-press <x> <y> [durationMs]                Long-press coordinate
@@ -90,8 +92,6 @@ Commands:
   wait-sleep [durationMs]                        Sleep wait
   wait-text <text> [timeoutMs]                   Wait until text appears
   wait-gone <text> [timeoutMs]                   Wait until text disappears
-  tap-jev <description> [flags...]               Optional 1-shot Jev tap (recommended, loop-proof; needs Jev key)
-  run-jev <goal> [--max-steps 2] [flags...]      Optional 1-3 step Jev micro-loop (needs Jev key)
 EOF
 }
 
@@ -193,6 +193,39 @@ case "$cmd" in
     else
       request GET "/v1/screen/marks" || true
     fi
+    ;;
+
+  check)
+    tmp_info="$(mktemp)"
+    code_info="$(curl -sS -o "$tmp_info" -w '%{http_code}' "${AUTH_ARGS[@]}" "${URL}/v1/device/info")"
+    if (( code_info < 200 || code_info >= 300 )); then
+      pp < "$tmp_info"
+      rm -f "$tmp_info"
+      echo "HTTP ${code_info} (GET /v1/device/info)" >&2
+      exit 1
+    fi
+    if command -v jq >/dev/null 2>&1; then
+      jq -r '"pkg=\(.foregroundPackage // "unknown") locked=\(.deviceLocked) screenOn=\(.screenOn)"' < "$tmp_info"
+    else
+      cat "$tmp_info"
+      echo
+    fi
+    rm -f "$tmp_info"
+
+    tmp_marks="$(mktemp)"
+    code_marks="$(curl -sS -o "$tmp_marks" -w '%{http_code}' "${AUTH_ARGS[@]}" "${URL}/v1/screen/marks?refresh=true")"
+    if (( code_marks < 200 || code_marks >= 300 )); then
+      pp < "$tmp_marks"
+      rm -f "$tmp_marks"
+      echo "HTTP ${code_marks} (GET /v1/screen/marks?refresh=true)" >&2
+      exit 1
+    fi
+    if command -v jq >/dev/null 2>&1; then
+      print_marks_compact < "$tmp_marks"
+    else
+      pp < "$tmp_marks"
+    fi
+    rm -f "$tmp_marks"
     ;;
 
   marks)
@@ -382,11 +415,6 @@ case "$cmd" in
     ;;
 
   tap-jev)
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    exec python3 "${script_dir}/jev-runner.py" --once "$@"
-    ;;
-
-  run-jev)
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     exec python3 "${script_dir}/jev-runner.py" "$@"
     ;;
