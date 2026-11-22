@@ -117,7 +117,26 @@ scripts/android-use.sh launch-uri <uri>
 scripts/android-use.sh wait-sleep [durationMs]
 scripts/android-use.sh wait-text <text> [timeoutMs]
 scripts/android-use.sh wait-gone <text> [timeoutMs]
+
+# Optional fast subtask runner (requires TYPESAFE_API_KEY or OPENROUTER_API_KEY)
+scripts/android-use.sh run-jev "<subtask goal>" [--max-steps 12] [--text "<input>"] [--submit] [--no-vision]
 ```
+
+## Optional Fast Subtask Runner (Jev)
+
+If `TYPESAFE_API_KEY` (direct TypeSafe `/v1/systemone`, default `jev-latest`) or `OPENROUTER_API_KEY` (OpenRouter `/api/alpha/decisions`, default `typesafe/jev-1.14`) is set in the environment, you can delegate repetitive multi-step UI navigation to the fast System-1 runner instead of taking one LLM turn per tap:
+
+```bash
+scripts/android-use.sh run-jev "Open Network & internet and enable Wi-Fi" --max-steps 8
+scripts/android-use.sh run-jev "Search for Tokyo weather" --text "Tokyo weather" --submit
+```
+
+- Runs text-first using live `marks` (~150–300ms per decision) and falls back to `screenshot?annotate=true` only when unlabeled icons or low confidence require vision (disable with `--no-vision`).
+- Optional overrides: `JEV_PROVIDER=typesafe|openrouter`, `JEV_MODEL=<model-id>`, `JEV_ENDPOINT=<custom-url>`.
+- Exit codes & handoff:
+  - `0` (`status: "done"`): subtask completed.
+  - `10` (`status: "escalate"` or `"max_steps"`): runner paused cleanly (e.g. needs free-form text, sensitive confirmation, low confidence, or Canvas screen) and printed `steps` + `last_screen_marks` so you can immediately resume with standard commands.
+  - `2` (`code: "JEV_NOT_CONFIGURED"`): no Jev API key is set — continue normally with `marks` / `tree` / `tap-mark`.
 
 ## Error Recovery
 
