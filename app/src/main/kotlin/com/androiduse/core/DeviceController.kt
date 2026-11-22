@@ -10,13 +10,19 @@ import com.androiduse.protocol.KeyRequest
 import com.androiduse.protocol.LaunchAppRequest
 import com.androiduse.protocol.LaunchAppResponse
 import com.androiduse.protocol.LongPressRequest
+import com.androiduse.protocol.MarksResponse
 import com.androiduse.protocol.ScreenStateResponse
 import com.androiduse.protocol.SessionStatusResponse
 import com.androiduse.protocol.StartSessionRequest
 import com.androiduse.protocol.SwipeRequest
+import com.androiduse.protocol.TapElementRequest
 import com.androiduse.protocol.TapRequest
 import com.androiduse.protocol.TextActionResponse
 import com.androiduse.protocol.TypeTextRequest
+import com.androiduse.protocol.UiBounds
+import com.androiduse.protocol.UiMark
+import com.androiduse.protocol.UiNode
+import com.androiduse.protocol.UiPoint
 import com.androiduse.protocol.UiTreeResponse
 import com.androiduse.protocol.WaitRequest
 import com.androiduse.protocol.WaitResponse
@@ -42,12 +48,14 @@ interface DeviceController {
     suspend fun wakeDevice(): WakeResponse
     suspend fun captureScreenshot(options: CaptureOptions = CaptureOptions()): CaptureResult
     suspend fun getUiTree(options: UiTreeOptions = UiTreeOptions()): UiTreeResponse
+    suspend fun getMarks(refresh: Boolean = false): MarksResponse
     suspend fun getScreenState(
         captureOptions: CaptureOptions = CaptureOptions(),
         treeOptions: UiTreeOptions = UiTreeOptions(),
         includeScreenshot: Boolean = true,
     ): ScreenStateResponse
     suspend fun tap(request: TapRequest): ActionResponse
+    suspend fun tapElement(request: TapElementRequest): ActionResponse
     suspend fun longPress(request: LongPressRequest): ActionResponse
     suspend fun swipe(request: SwipeRequest): ActionResponse
     suspend fun pressKey(request: KeyRequest): ActionResponse
@@ -70,11 +78,16 @@ class DefaultDeviceController(
     private val sessionManager: SessionManager = SessionManager(),
     private val powerController: DevicePowerController = StaticDevicePowerController(),
     private val overlayFeedback: ActionOverlayFeedback = NoOpActionOverlayFeedback,
+    private val screenshotAnnotator: ScreenshotAnnotator = NoOpScreenshotAnnotator,
     private val serverVersion: String,
     private val clockMs: () -> Long = { System.currentTimeMillis() },
 ) : DeviceController {
 
     private val actionMutex = Mutex()
+    @Volatile
+    private var lastTree: UiTreeResponse? = null
+    @Volatile
+    private var lastMarks: MarksResponse? = null
 
     override suspend fun getHealth(): HealthResponse {
         val sessionActive = sessionManager.currentSession() != null
@@ -117,6 +130,8 @@ class DefaultDeviceController(
 
     override suspend fun endSession(): SessionStatusResponse {
         sessionManager.endSession()
+        lastTree = null
+        lastMarks = null
         overlayFeedback.setSessionActive(active = false, label = null, keepAwake = false)
         return toSessionResponse(null, powerController.getPowerState())
     }
@@ -133,17 +148,56 @@ class DefaultDeviceController(
 
     override suspend fun captureScreenshot(options: CaptureOptions): CaptureResult {
         sessionManager.requireActiveSessionAndTouch()
-        overlayFeedback.beforeScreenshot()
-        return try {
-            screenCapturer.capture(options)
-        } finally {
-            overlayFeedback.showCaptured()
+        val raw = captureRawScreenshot(options)
+        if (!options.annotate) {
+            return raw
         }
+        val tree = uiTreeInspector.inspect(UiTreeOptions())
+        lastTree = tree
+        val marks = SetOfMarkSelector.select(
+            tree = tree,
+            displayWidth = raw.displayWidth,
+            displayHeight = raw.displayHeight,
+        )
+        lastMarks = MarksResponse(
+            count = marks.size,
+            displayWidth = raw.displayWidth,
+            displayHeight = raw.displayHeight,
+            timestampMs = raw.timestampMs,
+            marks = marks,
+        )
+        return screenshotAnnotator.annotate(raw, marks)
     }
 
     override suspend fun getUiTree(options: UiTreeOptions): UiTreeResponse {
         sessionManager.requireActiveSessionAndTouch()
-        return uiTreeInspector.inspect(options)
+        val tree = uiTreeInspector.inspect(options)
+        lastTree = tree
+        return tree
+    }
+
+    override suspend fun getMarks(refresh: Boolean): MarksResponse {
+        sessionManager.requireActiveSessionAndTouch()
+        if (!refresh) {
+            lastMarks?.let { return it }
+        }
+        val info = deviceInfoProvider.getDeviceInfo()
+        val tree = uiTreeInspector.inspect(UiTreeOptions())
+        lastTree = tree
+        val marks = SetOfMarkSelector.select(
+            tree = tree,
+            displayWidth = info.displayWidth,
+            displayHeight = info.displayHeight,
+        )
+        val response = MarksResponse(
+            count = marks.size,
+            displayWidth = info.displayWidth,
+            displayHeight = info.displayHeight,
+            timestampMs = clockMs(),
+            marks = marks,
+        )
+        lastMarks = response
+        return response
     }
 
     override suspend fun getScreenState(
@@ -154,15 +208,50 @@ class DefaultDeviceController(
         sessionManager.requireActiveSessionAndTouch()
         val device = getDeviceInfo()
         val tree = getUiTree(treeOptions)
+        var marks: List<UiMark>? = null
         val screenshot = if (includeScreenshot) {
-            captureScreenshot(captureOptions).toBase64Response()
+            val raw = captureRawScreenshot(captureOptions)
+            if (captureOptions.annotate) {
+                val computed = SetOfMarkSelector.select(
+                    tree = tree,
+                    displayWidth = raw.displayWidth,
+                    displayHeight = raw.displayHeight,
+                )
+                marks = computed
+                lastMarks = MarksResponse(
+                    count = computed.size,
+                    displayWidth = raw.displayWidth,
+                    displayHeight = raw.displayHeight,
+                    timestampMs = raw.timestampMs,
+                    marks = computed,
+                )
+                screenshotAnnotator.annotate(raw, computed).toBase64Response()
+            } else {
+                raw.toBase64Response()
+            }
         } else {
+            if (captureOptions.annotate) {
+                val computed = SetOfMarkSelector.select(
+                    tree = tree,
+                    displayWidth = device.displayWidth,
+                    displayHeight = device.displayHeight,
+                )
+                marks = computed
+                lastMarks = MarksResponse(
+                    count = computed.size,
+                    displayWidth = device.displayWidth,
+                    displayHeight = device.displayHeight,
+                    timestampMs = clockMs(),
+                    marks = computed,
+                )
+            }
             null
         }
         return ScreenStateResponse(
             device = device,
             screenshot = screenshot,
             tree = tree,
+            marks = marks,
             timestampMs = clockMs(),
         )
     }
@@ -192,6 +281,185 @@ class DefaultDeviceController(
             )
         }
     }
+
+    override suspend fun tapElement(request: TapElementRequest): ActionResponse {
+        sessionManager.requireActiveSessionAndTouch()
+
+        val hasMarkId = request.markId != null
+        val nodeIdQuery = request.nodeId?.trim()?.takeIf { it.isNotEmpty() }
+        val textQuery = request.text?.takeIf { it.isNotEmpty() }
+        val descQuery = request.contentDescription?.takeIf { it.isNotEmpty() }
+        val resIdQuery = request.resourceId?.takeIf { it.isNotEmpty() }
+        val hasSelector = textQuery != null || descQuery != null || resIdQuery != null
+
+        if (!hasMarkId && nodeIdQuery == null && !hasSelector) {
+            throw AndroidUseException.invalidRequest(
+                "Provide at least one target: 'markId', 'nodeId', 'text', 'contentDescription', or 'resourceId'.",
+            )
+        }
+        if (request.index < 0) {
+            throw AndroidUseException.invalidRequest("index must be >= 0 (got ${request.index}).")
+        }
+
+        val effectiveDurationMs = request.durationMs ?: if (request.longPress) 600L else 50L
+        if (request.longPress) {
+            validateDuration(effectiveDurationMs, minMs = 200L, maxMs = 5_000L, name = "long-press durationMs")
+        } else {
+            validateDuration(effectiveDurationMs, minMs = 10L, maxMs = 500L, name = "tap durationMs")
+        }
+
+        return withActionLock {
+            val info = deviceInfoProvider.getDeviceInfo()
+            val resolved = resolveElementTarget(
+                request = request,
+                nodeIdQuery = nodeIdQuery,
+                textQuery = textQuery,
+                descQuery = descQuery,
+                resIdQuery = resIdQuery,
+                displayWidth = info.displayWidth,
+                displayHeight = info.displayHeight,
+            )
+
+            overlayFeedback.showTap(point = resolved.point, longPress = request.longPress)
+            if (request.longPress) {
+                inputDispatcher.longPress(point = resolved.point, durationMs = effectiveDurationMs)
+            } else {
+                inputDispatcher.tap(point = resolved.point, durationMs = effectiveDurationMs)
+            }
+
+            ActionResponse(
+                ok = true,
+                action = if (request.longPress) "long_press_element" else "tap_element",
+                resolvedPoint = resolved.point,
+                matchedNode = resolved.node,
+                matchedMarkId = resolved.markId,
+                durationMs = effectiveDurationMs,
+                timestampMs = clockMs(),
+            )
+        }
+    }
+
+    private suspend fun captureRawScreenshot(options: CaptureOptions): CaptureResult {
+        overlayFeedback.beforeScreenshot()
+        return try {
+            screenCapturer.capture(options)
+        } finally {
+            overlayFeedback.showCaptured()
+        }
+    }
+
+    private suspend fun resolveElementTarget(
+        request: TapElementRequest,
+        nodeIdQuery: String?,
+        textQuery: String?,
+        descQuery: String?,
+        resIdQuery: String?,
+        displayWidth: Int,
+        displayHeight: Int,
+    ): ResolvedElementTarget {
+        if (request.markId != null) {
+            val snapshot = lastMarks ?: throw AndroidUseException.elementNotFound(
+                "No Set-of-Mark snapshot available. Capture an annotated screenshot (annotate=true) or call GET /v1/screen/marks first.",
+            )
+            val mark = snapshot.marks.firstOrNull { it.markId == request.markId }
+                ?: throw AndroidUseException.elementNotFound(
+                    "Mark #${request.markId} not found in latest Set-of-Mark snapshot (available: 1..${snapshot.count}).",
+                )
+            val point = clippedCenterOrThrow(
+                bounds = mark.bounds,
+                displayWidth = displayWidth,
+                displayHeight = displayHeight,
+                label = "mark #${mark.markId}",
+            )
+            val matchedNode = lastTree?.let { UiTreeMatcher.findByNodeId(it.roots, mark.nodeId) }
+            return ResolvedElementTarget(point = point, node = matchedNode, markId = mark.markId)
+        }
+
+        if (nodeIdQuery != null) {
+            val tree = lastTree ?: uiTreeInspector.inspect(UiTreeOptions()).also { lastTree = it }
+            val node = UiTreeMatcher.findByNodeId(tree.roots, nodeIdQuery)
+                ?: throw AndroidUseException.elementNotFound(
+                    "Node '$nodeIdQuery' not found in latest UI tree. Refresh /v1/screen/tree and retry.",
+                )
+            val point = clippedCenterOrThrow(
+                bounds = node.bounds,
+                displayWidth = displayWidth,
+                displayHeight = displayHeight,
+                label = "node '$nodeIdQuery'",
+            )
+            return ResolvedElementTarget(point = point, node = node, markId = null)
+        }
+
+        // Selector-based lookup ALWAYS inspects the live UI tree right before tapping to avoid stale bounds.
+        val liveTree = uiTreeInspector.inspect(UiTreeOptions())
+        lastTree = liveTree
+        val allMatches = UiTreeMatcher.findAllMatches(
+            roots = liveTree.roots,
+            text = textQuery,
+            contentDescription = descQuery,
+            resourceId = resIdQuery,
+            exact = request.exact,
+            clickableOnly = request.clickableOnly,
+        )
+        val visibleMatches = allMatches.mapNotNull { node ->
+            val clipped = node.bounds.intersect(displayWidth, displayHeight) ?: return@mapNotNull null
+            node to clipped
+        }
+
+        if (visibleMatches.isEmpty()) {
+            val desc = buildSelectorDescription(textQuery, descQuery, resIdQuery)
+            throw AndroidUseException.elementNotFound(
+                "No visible UI element matched $desc.",
+            )
+        }
+        if (request.index >= visibleMatches.size) {
+            val desc = buildSelectorDescription(textQuery, descQuery, resIdQuery)
+            throw AndroidUseException.elementNotFound(
+                "Matched ${visibleMatches.size} visible element(s) for $desc, but index=${request.index} is out of range.",
+            )
+        }
+
+        val (node, clipped) = visibleMatches[request.index]
+        val center = clipped.center()
+        val point = UiPoint(
+            x = center.x.coerceIn(0, (displayWidth - 1).coerceAtLeast(0)),
+            y = center.y.coerceIn(0, (displayHeight - 1).coerceAtLeast(0)),
+        )
+        return ResolvedElementTarget(point = point, node = node, markId = null)
+    }
+
+    private fun clippedCenterOrThrow(
+        bounds: UiBounds,
+        displayWidth: Int,
+        displayHeight: Int,
+        label: String,
+    ): UiPoint {
+        val clipped = bounds.intersect(displayWidth, displayHeight)
+            ?: throw AndroidUseException.elementNotFound(
+                "Target $label is outside visible display bounds (${displayWidth}x$displayHeight).",
+            )
+        val center = clipped.center()
+        return UiPoint(
+            x = center.x.coerceIn(0, (displayWidth - 1).coerceAtLeast(0)),
+            y = center.y.coerceIn(0, (displayHeight - 1).coerceAtLeast(0)),
+        )
+    }
+
+    private fun buildSelectorDescription(
+        text: String?,
+        contentDescription: String?,
+        resourceId: String?,
+    ): String = buildList {
+        if (text != null) add("text='$text'")
+        if (contentDescription != null) add("contentDescription='$contentDescription'")
+        if (resourceId != null) add("resourceId='$resourceId'")
+    }.joinToString(" and ")
+
+    private data class ResolvedElementTarget(
+        val point: UiPoint,
+        val node: UiNode?,
+        val markId: Int?,
+    )
 
     override suspend fun longPress(request: LongPressRequest): ActionResponse {
         sessionManager.requireActiveSessionAndTouch()

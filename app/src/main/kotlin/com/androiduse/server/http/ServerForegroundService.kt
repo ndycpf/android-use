@@ -184,6 +184,7 @@ class ServerForegroundService : Service() {
             sessionManager = sessionManager,
             powerController = powerController,
             overlayFeedback = overlay,
+            screenshotAnnotator = com.androiduse.android.AndroidScreenshotAnnotator(),
             serverVersion = versionName,
         )
 

@@ -180,6 +180,9 @@ fun Application.configureAndroidUseHttp(
                         call.response.header("X-Image-Scale", result.scale.toString())
                         call.response.header("X-Display-Rotation", result.rotation.toString())
                         call.response.header("X-Capture-Timestamp-Ms", result.timestampMs.toString())
+                        result.marks?.let { marks ->
+                            call.response.header("X-Mark-Count", marks.size.toString())
+                        }
                         call.respondBytes(
                             bytes = result.bytes,
                             contentType = ContentType.parse(result.mimeType),
@@ -192,6 +195,11 @@ fun Application.configureAndroidUseHttp(
             get("/screen/tree") {
                 val treeOptions = parseUiTreeQuery(call.request.queryParameters)
                 call.respond(controller.getUiTree(treeOptions))
+            }
+
+            get("/screen/marks") {
+                val refresh = parseBooleanParam(call.request.queryParameters, "refresh", default = false)
+                call.respond(controller.getMarks(refresh = refresh))
             }
 
             get("/screen/state") {
@@ -212,6 +220,11 @@ fun Application.configureAndroidUseHttp(
                 post("/tap") {
                     val request = call.receive<TapRequest>()
                     call.respond(controller.tap(request))
+                }
+
+                post("/tap-element") {
+                    val request = call.receive<com.androiduse.protocol.TapElementRequest>()
+                    call.respond(controller.tapElement(request))
                 }
 
                 post("/long-press") {
@@ -320,11 +333,14 @@ private fun parseScreenshotQuery(params: Parameters): Pair<CaptureOptions, Scree
         )
     }
 
+    val annotate = parseBooleanParam(params, "annotate", default = false)
+
     val options = CaptureOptions(
         format = format,
         quality = quality,
         maxDimension = maxDimension,
         allowCachedMs = allowCachedMs,
+        annotate = annotate,
     ).validate()
 
     return options to encoding

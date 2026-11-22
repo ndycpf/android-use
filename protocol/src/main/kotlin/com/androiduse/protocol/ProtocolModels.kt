@@ -24,6 +24,7 @@ enum class ErrorCode {
     SCREENSHOT_FAILED,
     SCREENSHOT_RATE_LIMITED,
     NO_FOCUSED_INPUT,
+    ELEMENT_NOT_FOUND,
     APP_NOT_FOUND,
     WAIT_TIMEOUT,
     ACTION_FAILED,
@@ -111,6 +112,7 @@ data class ScreenshotResponse(
     val rotation: Int,
     val timestampMs: Long,
     val dataBase64: String,
+    val marks: List<UiMark>? = null,
 )
 
 @Serializable
@@ -136,7 +138,54 @@ data class UiBounds(
         x = (left + right) / 2,
         y = (top + bottom) / 2,
     )
+
+    /**
+     * Clips these bounds to the `[0, displayWidth] x [0, displayHeight]` screen viewport.
+     * Returns `null` if the bounds do not intersect the visible screen area.
+     */
+    fun intersect(displayWidth: Int, displayHeight: Int): UiBounds? {
+        if (displayWidth <= 0 || displayHeight <= 0) return null
+        val clippedLeft = left.coerceIn(0, displayWidth)
+        val clippedTop = top.coerceIn(0, displayHeight)
+        val clippedRight = right.coerceIn(0, displayWidth)
+        val clippedBottom = bottom.coerceIn(0, displayHeight)
+        if (clippedRight <= clippedLeft || clippedBottom <= clippedTop) return null
+        return UiBounds(
+            left = clippedLeft,
+            top = clippedTop,
+            right = clippedRight,
+            bottom = clippedBottom,
+        )
+    }
 }
+
+@Serializable
+data class UiMark(
+    val markId: Int,
+    val nodeId: String,
+    val text: String? = null,
+    val contentDescription: String? = null,
+    val hintText: String? = null,
+    val resourceId: String? = null,
+    val className: String? = null,
+    val bounds: UiBounds,
+    val center: UiPoint,
+    val clickable: Boolean = false,
+    val longClickable: Boolean = false,
+    val editable: Boolean = false,
+    val scrollable: Boolean = false,
+    val checkable: Boolean = false,
+    val checked: Boolean = false,
+)
+
+@Serializable
+data class MarksResponse(
+    val count: Int,
+    val displayWidth: Int,
+    val displayHeight: Int,
+    val timestampMs: Long,
+    val marks: List<UiMark>,
+)
 
 @Serializable
 data class UiNode(
@@ -177,6 +226,7 @@ data class ScreenStateResponse(
     val device: DeviceInfoResponse,
     val screenshot: ScreenshotResponse? = null,
     val tree: UiTreeResponse,
+    val marks: List<UiMark>? = null,
     val timestampMs: Long,
 )
 
@@ -188,6 +238,20 @@ data class TapRequest(
     val imageWidth: Int? = null,
     val imageHeight: Int? = null,
     val durationMs: Long = 50L,
+)
+
+@Serializable
+data class TapElementRequest(
+    val markId: Int? = null,
+    val nodeId: String? = null,
+    val text: String? = null,
+    val contentDescription: String? = null,
+    val resourceId: String? = null,
+    val exact: Boolean = false,
+    val index: Int = 0,
+    val clickableOnly: Boolean = false,
+    val longPress: Boolean = false,
+    val durationMs: Long? = null,
 )
 
 @Serializable
@@ -223,6 +287,8 @@ data class ActionResponse(
     val action: String,
     val resolvedPoint: UiPoint? = null,
     val resolvedEndPoint: UiPoint? = null,
+    val matchedNode: UiNode? = null,
+    val matchedMarkId: Int? = null,
     val durationMs: Long,
     val timestampMs: Long,
 )

@@ -369,6 +369,129 @@ class DefaultDeviceControllerTest {
         )
     }
 
+    @Test
+    fun `tapElement resolves live text selector with viewport clipping, nodeId, and markId from annotated capture`() =
+        runTest {
+            val dispatcher = RecordingInputDispatcher()
+            var liveBounds = UiBounds(100, 2200, 300, 2600) // partially off bottom (displayHeight=2400)
+            var annotateCalls = 0
+
+            val controller = DefaultDeviceController(
+                accessibilityRegistry = AccessibilityServiceRegistry(),
+                deviceInfoProvider = object : DeviceInfoProvider {
+                    override fun getDeviceInfo(): DeviceInfoResponse = sampleDeviceInfo()
+                },
+                screenCapturer = object : ScreenCapturer {
+                    override suspend fun capture(options: CaptureOptions): CaptureResult = sampleCapture()
+                },
+                uiTreeInspector = object : UiTreeInspector {
+                    override suspend fun inspect(options: UiTreeOptions): UiTreeResponse = UiTreeResponse(
+                        packageName = "com.example.app",
+                        windowCount = 1,
+                        nodeCount = 2,
+                        timestampMs = 50L,
+                        roots = listOf(
+                            UiNode(
+                                nodeId = "n1",
+                                text = "Continue",
+                                resourceId = "com.example.app:id/btn_continue",
+                                bounds = liveBounds,
+                                center = liveBounds.center(),
+                                clickable = true,
+                            ),
+                            UiNode(
+                                nodeId = "n2",
+                                contentDescription = "More options",
+                                bounds = UiBounds(920, 100, 1040, 220),
+                                center = UiPoint(980, 160),
+                                clickable = true,
+                            ),
+                        ),
+                    )
+                },
+                inputDispatcher = dispatcher,
+                textInputController = RecordingTextInputController(),
+                appController = RecordingAppController(),
+                screenshotAnnotator = object : ScreenshotAnnotator {
+                    override fun annotate(capture: CaptureResult, marks: List<com.androiduse.protocol.UiMark>): CaptureResult {
+                        annotateCalls++
+                        return capture.copy(marks = marks)
+                    }
+                },
+                serverVersion = "0.1.0",
+                clockMs = { 999L },
+            )
+
+            controller.startSession()
+
+            // 1. Live text selector clips bounds [2200..2600] -> [2200..2400], center y = 2300.
+            val textRes = controller.tapElement(
+                com.androiduse.protocol.TapElementRequest(text = "continue"),
+            )
+            assertTrue(textRes.ok)
+            assertEquals("tap_element", textRes.action)
+            assertEquals(UiPoint(200, 2300), textRes.resolvedPoint)
+            assertEquals("n1", textRes.matchedNode?.nodeId)
+
+            // 2. Simulate layout shift: live selector picks up the new position immediately!
+            liveBounds = UiBounds(400, 1000, 600, 1200)
+            val shiftedRes = controller.tapElement(
+                com.androiduse.protocol.TapElementRequest(resourceId = "btn_continue", longPress = true),
+            )
+            assertEquals("long_press_element", shiftedRes.action)
+            assertEquals(UiPoint(500, 1100), shiftedRes.resolvedPoint)
+
+            // 3. Set-of-Mark annotated screenshot populates marks in reading order (#1 = top-right icon, #2 = Continue).
+            val annotated = controller.captureScreenshot(CaptureOptions(annotate = true))
+            assertEquals(1, annotateCalls)
+            assertEquals(2, annotated.marks?.size)
+            assertEquals("n2", annotated.marks!![0].nodeId)
+            assertEquals("n1", annotated.marks!![1].nodeId)
+
+            val marksSnapshot = controller.getMarks(refresh = false)
+            assertEquals(2, marksSnapshot.count)
+
+            // Tap mark #1 -> hits "More options" icon at (980, 160).
+            val markRes = controller.tapElement(com.androiduse.protocol.TapElementRequest(markId = 1))
+            assertEquals(1, markRes.matchedMarkId)
+            assertEquals(UiPoint(980, 160), markRes.resolvedPoint)
+            assertEquals("n2", markRes.matchedNode?.nodeId)
+
+            // Tap by nodeId -> hits n1 at (500, 1100).
+            val nodeRes = controller.tapElement(com.androiduse.protocol.TapElementRequest(nodeId = "n1"))
+            assertEquals(UiPoint(500, 1100), nodeRes.resolvedPoint)
+
+            assertEquals(
+                listOf(
+                    "tap:(200,2300):50",
+                    "longPress:(500,1100):600",
+                    "tap:(980,160):50",
+                    "tap:(500,1100):50",
+                ),
+                dispatcher.events,
+            )
+
+            // 4. Missing element returns 404 ELEMENT_NOT_FOUND.
+            try {
+                controller.tapElement(com.androiduse.protocol.TapElementRequest(text = "DoesNotExist"))
+                fail("Expected ELEMENT_NOT_FOUND")
+            } catch (e: AndroidUseException) {
+                assertEquals(ErrorCode.ELEMENT_NOT_FOUND, e.code)
+                assertEquals(404, e.httpStatus)
+            }
+
+            // 5. Ending session clears cached marks snapshot.
+            controller.endSession()
+            controller.startSession()
+            try {
+                controller.tapElement(com.androiduse.protocol.TapElementRequest(markId = 1))
+                fail("Expected ELEMENT_NOT_FOUND after session reset")
+            } catch (e: AndroidUseException) {
+                assertEquals(ErrorCode.ELEMENT_NOT_FOUND, e.code)
+                assertEquals(404, e.httpStatus)
+            }
+        }
+
     private suspend fun assertSessionRequired(block: suspend () -> Unit) {
         try {
             block()

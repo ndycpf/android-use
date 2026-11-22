@@ -746,6 +746,46 @@ class LocalHttpRoutesTest {
             )
         }
 
+        var lastTapElementRequest: com.androiduse.protocol.TapElementRequest? = null
+        var lastMarksRefresh: Boolean? = null
+        var tapElementError: AndroidUseException? = null
+
+        override suspend fun getMarks(refresh: Boolean): com.androiduse.protocol.MarksResponse {
+            lastMarksRefresh = refresh
+            return com.androiduse.protocol.MarksResponse(
+                count = 1,
+                displayWidth = deviceInfo.displayWidth,
+                displayHeight = deviceInfo.displayHeight,
+                timestampMs = 12L,
+                marks = listOf(
+                    com.androiduse.protocol.UiMark(
+                        markId = 1,
+                        nodeId = "n1",
+                        text = "Search",
+                        bounds = UiBounds(0, 0, 500, 120),
+                        center = UiPoint(250, 60),
+                        clickable = true,
+                    ),
+                ),
+            )
+        }
+
+        override suspend fun tapElement(
+            request: com.androiduse.protocol.TapElementRequest,
+        ): ActionResponse {
+            lastTapElementRequest = request
+            tapElementError?.let { throw it }
+            return ActionResponse(
+                ok = true,
+                action = if (request.longPress) "long_press_element" else "tap_element",
+                resolvedPoint = UiPoint(250, 60),
+                matchedNode = uiTreeResponse.roots.firstOrNull(),
+                matchedMarkId = request.markId,
+                durationMs = request.durationMs ?: 50L,
+                timestampMs = 13L,
+            )
+        }
+
         override suspend fun waitFor(
             request: com.androiduse.protocol.WaitRequest,
         ): com.androiduse.protocol.WaitResponse {
@@ -758,6 +798,69 @@ class LocalHttpRoutesTest {
             )
         }
     }
+
+    @Test
+    fun `GET v1 screen screenshot annotate=true, GET v1 screen marks, and POST v1 actions tap-element work`() =
+        testApplication {
+            val mark = com.androiduse.protocol.UiMark(
+                markId = 1,
+                nodeId = "n1",
+                text = "Search",
+                bounds = UiBounds(0, 0, 500, 120),
+                center = UiPoint(250, 60),
+                clickable = true,
+            )
+            val controller = FakeDeviceController(
+                screenshotResult = CaptureResult(
+                    bytes = byteArrayOf(1, 2, 3),
+                    format = ImageFormat.JPEG,
+                    mimeType = "image/jpeg",
+                    width = 540,
+                    height = 1200,
+                    displayWidth = 1080,
+                    displayHeight = 2400,
+                    scale = 0.5,
+                    rotation = 0,
+                    timestampMs = 1L,
+                    marks = listOf(mark),
+                ),
+            )
+            application {
+                configureAndroidUseHttp(controller)
+            }
+
+            val shotRes = client.get("/v1/screen/screenshot?encoding=binary&annotate=true")
+            assertEquals(HttpStatusCode.OK, shotRes.status)
+            assertEquals(true, controller.lastCaptureOptions?.annotate)
+            assertEquals("1", shotRes.headers["X-Mark-Count"])
+
+            val marksRes = client.get("/v1/screen/marks?refresh=true")
+            assertEquals(HttpStatusCode.OK, marksRes.status)
+            assertEquals(true, controller.lastMarksRefresh)
+            val marksBody = json.decodeFromString<com.androiduse.protocol.MarksResponse>(marksRes.bodyAsText())
+            assertEquals(1, marksBody.count)
+            assertEquals(1, marksBody.marks.first().markId)
+
+            val tapElRes = client.post("/v1/actions/tap-element") {
+                contentType(ContentType.Application.Json)
+                setBody("""{"markId":1}""")
+            }
+            assertEquals(HttpStatusCode.OK, tapElRes.status)
+            assertEquals(1, controller.lastTapElementRequest?.markId)
+            val tapElBody = json.decodeFromString<ActionResponse>(tapElRes.bodyAsText())
+            assertEquals("tap_element", tapElBody.action)
+            assertEquals(1, tapElBody.matchedMarkId)
+            assertEquals(UiPoint(250, 60), tapElBody.resolvedPoint)
+
+            controller.tapElementError = AndroidUseException.elementNotFound("No element matched text='Missing'.")
+            val missRes = client.post("/v1/actions/tap-element") {
+                contentType(ContentType.Application.Json)
+                setBody("""{"text":"Missing"}""")
+            }
+            assertEquals(HttpStatusCode.NotFound, missRes.status)
+            val errBody = json.decodeFromString<ErrorResponse>(missRes.bodyAsText())
+            assertEquals(ErrorCode.ELEMENT_NOT_FOUND, errBody.error.code)
+        }
 
     @Test
     fun `GET v1 apps, POST v1 apps launch, and POST v1 wait return expected JSON`() = testApplication {

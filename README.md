@@ -100,8 +100,8 @@ All endpoints are under `/v1/`:
 
 - **Session**: `GET /v1/session`, `POST /v1/session/start`, `POST /v1/session/end`
 - **Device**: `GET /v1/health`, `GET /v1/device/info`, `POST /v1/device/wake`
-- **Observe**: `GET /v1/screen/screenshot`, `GET /v1/screen/tree`, `GET /v1/screen/state`
-- **Act**: `POST /v1/actions/{tap,long-press,swipe,key,type,clear,ime}`
+- **Observe**: `GET /v1/screen/screenshot` (`annotate=true` for Set-of-Mark), `GET /v1/screen/marks`, `GET /v1/screen/tree`, `GET /v1/screen/state`
+- **Act**: `POST /v1/actions/{tap-element,tap,long-press,swipe,key,type,clear,ime}`
 - **Apps & waiting**: `GET /v1/apps`, `POST /v1/apps/launch`, `POST /v1/wait`
 
 Design notes are in [docs/adr](docs/adr/README.md).

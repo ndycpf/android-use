@@ -17,9 +17,16 @@ class AndroidDeviceInfoProvider(
 ) : DeviceInfoProvider {
 
     override fun getDeviceInfo(): DeviceInfoResponse {
-        val windowManager = context.getSystemService(WindowManager::class.java)
-        val bounds = windowManager.currentWindowMetrics.bounds
-        val displayMetrics = context.resources.displayMetrics
+        val service = accessibilityRegistry.currentService()
+        val windowManager = service?.getSystemService(WindowManager::class.java)
+            ?: context.getSystemService(WindowManager::class.java)
+        val maxBounds = windowManager.maximumWindowMetrics.bounds
+        val bounds = if (maxBounds.width() > 0 && maxBounds.height() > 0) {
+            maxBounds
+        } else {
+            windowManager.currentWindowMetrics.bounds
+        }
+        val displayMetrics = (service ?: context).resources.displayMetrics
 
         val displayManager = context.getSystemService(DisplayManager::class.java)
         val rotationEnum = displayManager?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation
@@ -31,7 +38,6 @@ class AndroidDeviceInfoProvider(
             else -> 0
         }
 
-        val service = accessibilityRegistry.currentService()
         val foregroundPackage = runCatching {
             service?.rootInActiveWindow?.packageName?.toString()
         }.getOrNull()

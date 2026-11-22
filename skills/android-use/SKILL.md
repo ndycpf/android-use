@@ -51,19 +51,24 @@ Check `screenOn` and `deviceLocked` in the `session-start` / `info` response:
 2. **Prefer launching apps directly** instead of swiping through launcher pages:
    - Run `scripts/android-use.sh apps <query>` to find the `packageName`.
    - Run `scripts/android-use.sh launch <packageName>` (or `launch-uri <uri>`).
-3. **Observe efficiently**:
-   - Run `scripts/android-use.sh tree` first — it is fast, compact, and returns exact native pixel `center` coordinates for interactive elements.
-   - Run `scripts/android-use.sh screenshot /tmp/screen.jpg` when visual context, icons, images, or WebView layouts are needed.
-4. **Act with the right coordinate space**:
-   - Coordinates from `tree` (`node.center.x`, `node.center.y`) are native `pixel` coordinates.
-   - Coordinates estimated visually from a screenshot should use `normalized` (`0.0..1.0`) or `tap-image <x> <y> <imageWidth> <imageHeight>`.
-5. **Focus before typing**:
-   - Always `tap` an editable field (`editable: true`) before calling `type`, `clear`, or `ime`.
+3. **Observe efficiently & pick the right tap method (in priority order)**:
+   - **1st choice — Element-targeted tap (highest accuracy, no coordinate drift)**:
+     - Run `scripts/android-use.sh tree` first — it is fast and compact.
+     - Tap labeled buttons, list items, or fields using `scripts/android-use.sh tap-text "<label>"`, `tap-id "<resourceId>"`, or `tap-node <nodeId>`.
+     - `tap-text` and `tap-id` re-query the **live** UI tree right before tapping and clip bounds to the visible screen, preventing misses from layout shifts or coordinate mistakes.
+   - **2nd choice — Set-of-Mark visual tap (best for icon-only buttons, dense UIs, or ambiguous labels)**:
+     - Run `scripts/android-use.sh screenshot-marked /tmp/marked.jpg` to get a screenshot overlaid with numbered boxes (`[1]`, `[2]`, …) plus a compact marks legend.
+     - Visually pick the badge number on the image and tap it directly with `scripts/android-use.sh tap-mark <markId>` — no pixel estimation required.
+   - **3rd choice — Raw coordinate tap (fallback for Canvas, games, or custom WebView surfaces absent from the UI tree)**:
+     - Run `scripts/android-use.sh screenshot /tmp/screen.jpg` and check the `X-Image-Width` / `X-Image-Height` headers (screenshots are downscaled to `maxDimension=1280` by default).
+     - **Never** pass scaled screenshot pixels into `tap <x> <y> pixel`. Always use `tap-image <x> <y> <imageWidth> <imageHeight>` or `tap <x> <y> normalized` (`0.0..1.0`).
+4. **Focus before typing**:
+   - Always tap an editable field (`editable: true`, via `tap-text`, `tap-mark`, or `tap-node`) before calling `type`, `clear`, or `ime`.
    - If `type` returns `409 NO_FOCUSED_INPUT`, tap the input field again and retry.
-6. **Wait on UI transitions**:
+5. **Wait on UI transitions**:
    - Prefer `wait-text "<expected>" 5000` or `wait-gone "<spinner>" 5000` over fixed sleeps.
-7. **End the session when done** (`scripts/android-use.sh session-end`) so the overlay disappears and normal screen sleep resumes.
-8. **Safety guardrails**:
+6. **End the session when done** (`scripts/android-use.sh session-end`) so the overlay disappears and normal screen sleep resumes.
+7. **Safety guardrails**:
    - Ask the user for explicit confirmation before irreversible or sensitive actions (sending emails/messages, making payments or purchases, deleting data, modifying account/security settings, or entering passwords/2FA codes).
 
 ## Helper Script Reference (`scripts/android-use.sh`)
@@ -78,11 +83,19 @@ scripts/android-use.sh session-start [label] [idleTimeoutMs]
 scripts/android-use.sh session-end
 
 # Observation (session required)
-scripts/android-use.sh screenshot [out.jpg] [jpeg|png] [maxDimension]
 scripts/android-use.sh tree [maxDepth] [maxNodes]
-scripts/android-use.sh state [includeScreenshot:true|false]
+scripts/android-use.sh screenshot-marked [out.jpg] [jpeg|png] [maxDimension]
+scripts/android-use.sh marks [refresh:true|false]
+scripts/android-use.sh screenshot [out.jpg] [jpeg|png] [maxDimension]
+scripts/android-use.sh state [includeScreenshot:true|false] [annotate:true|false]
 
-# Pointer & navigation actions (session required)
+# Element-targeted & Set-of-Mark actions (preferred, session required)
+scripts/android-use.sh tap-text <text> [index] [exact:true|false]
+scripts/android-use.sh tap-id <resourceId> [index]
+scripts/android-use.sh tap-node <nodeId>
+scripts/android-use.sh tap-mark <markId>
+
+# Raw coordinate & navigation actions (fallback / gestures, session required)
 scripts/android-use.sh tap <x> <y> [pixel|normalized]
 scripts/android-use.sh tap-image <x> <y> <imageWidth> <imageHeight>
 scripts/android-use.sh long-press <x> <y> [durationMs]
@@ -108,9 +121,10 @@ scripts/android-use.sh wait-gone <text> [timeoutMs]
 | HTTP | Error Code | Meaning / Recovery |
 | --- | --- | --- |
 | `401` | `UNAUTHORIZED` | `ANDROID_USE_TOKEN` is missing or rotated; update token from the app UI. |
+| `404` | `ELEMENT_NOT_FOUND` | Selector / `nodeId` / `markId` did not match a visible element; refresh `tree` or `screenshot-marked`, scroll into view, or fall back to `tap-image`. |
 | `404` | `APP_NOT_FOUND` | Package is not launchable or URI has no handler; verify with `apps <query>`. |
-| `408` | `WAIT_TIMEOUT` | Expected UI element did not appear/disappear in time; inspect `tree` or `screenshot`. |
+| `408` | `WAIT_TIMEOUT` | Expected UI element did not appear/disappear in time; inspect `tree` or `screenshot-marked`. |
 | `409` | `SESSION_NOT_ACTIVE` | No active session (or session timed out); run `session-start` first. |
-| `409` | `NO_FOCUSED_INPUT` | No focused editable field; `tap` the input box before calling `type`/`clear`/`ime`. |
+| `409` | `NO_FOCUSED_INPUT` | No focused editable field; tap the input box before calling `type`/`clear`/`ime`. |
 | `429` | `SCREENSHOT_RATE_LIMITED` | Android throttled consecutive `takeScreenshot()` calls; wait ~500ms or use `allowCachedMs`. |
 | `503` | `ACCESSIBILITY_NOT_CONNECTED` | Accessibility Service is disabled on the device; ask the user to enable it in Android Settings. |

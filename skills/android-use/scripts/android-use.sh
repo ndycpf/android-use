@@ -68,9 +68,15 @@ Commands:
   session-start [label] [idleTimeoutMs]          Start a session (keeps overlay & screen awake)
   session-end                                    End active session (clears overlay & restores sleep)
   screenshot [out.jpg] [jpeg|png] [maxDimension] Capture binary screenshot to file (session required)
+  screenshot-marked [out.jpg] [jpeg|png] [maxDim] Capture Set-of-Mark numbered screenshot + print marks legend
+  marks [refresh:true|false]                     Get latest Set-of-Mark elements JSON
   tree [maxDepth] [maxNodes]                     Get normalized UI accessibility tree (session required)
-  state [includeScreenshot:true|false]           Get combined device info, UI tree, and optional screenshot
-  tap <x> <y> [pixel|normalized]                 Tap screen coordinate
+  state [includeScreenshot:true|false] [annotate] Get combined device info, UI tree, optional screenshot/marks
+  tap-text <text> [index] [exact:true|false]     Tap element by live text/description match (preferred)
+  tap-id <resourceId> [index]                    Tap element by live resourceId match
+  tap-node <nodeId>                              Tap element by nodeId from latest tree (e.g. n12)
+  tap-mark <markId>                              Tap numbered badge from latest screenshot-marked (e.g. 5)
+  tap <x> <y> [pixel|normalized]                 Tap screen coordinate (fallback for canvas/custom UI)
   tap-image <x> <y> <imageWidth> <imageHeight>   Tap coordinate in screenshot image space
   long-press <x> <y> [durationMs]                Long-press coordinate
   swipe [sx sy ex ey pixel|normalized durMs]     Swipe (default: scroll up 0.5,0.8 -> 0.5,0.2 normalized)
@@ -148,6 +154,41 @@ case "$cmd" in
     ls -lh "$out"
     ;;
 
+  screenshot-marked)
+    out="${1:-screen_marked.jpg}"
+    fmt="${2:-jpeg}"
+    max_dim="${3:-1280}"
+    tmp_hdr="$(mktemp)"
+    code="$(curl -sS -D "$tmp_hdr" -o "$out" -w '%{http_code}' "${AUTH_ARGS[@]}" \
+      "${URL}/v1/screen/screenshot?encoding=binary&format=${fmt}&maxDimension=${max_dim}&annotate=true")"
+    if (( code < 200 || code >= 300 )); then
+      cat "$out" >&2 || true
+      rm -f "$tmp_hdr"
+      echo "HTTP ${code} (GET /v1/screen/screenshot?annotate=true)" >&2
+      exit 1
+    fi
+    grep -iE '^(Content-Type:|X-)' "$tmp_hdr" || true
+    rm -f "$tmp_hdr"
+    ls -lh "$out"
+    # Print compact marks legend for immediate use with tap-mark <id>.
+    if command -v jq >/dev/null 2>&1; then
+      curl -sS "${AUTH_ARGS[@]}" "${URL}/v1/screen/marks" | jq -r '
+        .marks[] |
+        "[\(.markId)] " +
+        ((.text // .contentDescription // .hintText // .resourceId // .className // "element") | tostring) +
+        (if .editable then " (editable)" elif .checkable then " (checkable)" else "" end) +
+        " @(\(.center.x),\(.center.y))"
+      ' || true
+    else
+      request GET "/v1/screen/marks" || true
+    fi
+    ;;
+
+  marks)
+    refresh="${1:-false}"
+    request GET "/v1/screen/marks?refresh=${refresh}"
+    ;;
+
   tree)
     max_depth="${1:-30}"
     max_nodes="${2:-400}"
@@ -156,7 +197,47 @@ case "$cmd" in
 
   state)
     inc="${1:-false}"
-    request GET "/v1/screen/state?includeScreenshot=${inc}"
+    ann="${2:-false}"
+    request GET "/v1/screen/state?includeScreenshot=${inc}&annotate=${ann}"
+    ;;
+
+  tap-text)
+    text="${1:?usage: tap-text <text> [index] [exact:true|false]}"
+    idx="${2:-0}"
+    exact="${3:-false}"
+    if command -v jq >/dev/null 2>&1; then
+      payload="$(jq -n --arg t "$text" --argjson i "$idx" --argjson e "$exact" \
+        '{text:$t, index:$i, exact:$e}')"
+    else
+      payload="{\"text\":\"$(json_escape "$text")\",\"index\":${idx},\"exact\":${exact}}"
+    fi
+    request POST "/v1/actions/tap-element" "$payload"
+    ;;
+
+  tap-id)
+    res_id="${1:?usage: tap-id <resourceId> [index]}"
+    idx="${2:-0}"
+    if command -v jq >/dev/null 2>&1; then
+      payload="$(jq -n --arg r "$res_id" --argjson i "$idx" '{resourceId:$r, index:$i}')"
+    else
+      payload="{\"resourceId\":\"$(json_escape "$res_id")\",\"index\":${idx}}"
+    fi
+    request POST "/v1/actions/tap-element" "$payload"
+    ;;
+
+  tap-node)
+    node_id="${1:?usage: tap-node <nodeId>}"
+    if command -v jq >/dev/null 2>&1; then
+      payload="$(jq -n --arg n "$node_id" '{nodeId:$n}')"
+    else
+      payload="{\"nodeId\":\"$(json_escape "$node_id")\"}"
+    fi
+    request POST "/v1/actions/tap-element" "$payload"
+    ;;
+
+  tap-mark)
+    mark_id="${1:?usage: tap-mark <markId>}"
+    request POST "/v1/actions/tap-element" "{\"markId\":${mark_id}}"
     ;;
 
   tap)

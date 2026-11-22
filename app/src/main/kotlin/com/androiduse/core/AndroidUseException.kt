@@ -95,6 +95,15 @@ class AndroidUseException(
             retryable = false,
         )
 
+        fun elementNotFound(
+            message: String,
+        ): AndroidUseException = AndroidUseException(
+            code = ErrorCode.ELEMENT_NOT_FOUND,
+            message = message,
+            httpStatus = 404,
+            retryable = true,
+        )
+
         fun waitTimeout(
             message: String,
         ): AndroidUseException = AndroidUseException(

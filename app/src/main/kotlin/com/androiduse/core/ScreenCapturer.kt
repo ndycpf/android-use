@@ -2,6 +2,7 @@ package com.androiduse.core
 
 import com.androiduse.protocol.ImageFormat
 import com.androiduse.protocol.ScreenshotResponse
+import com.androiduse.protocol.UiMark
 import java.util.Base64
 
 data class CaptureOptions(
@@ -9,6 +10,7 @@ data class CaptureOptions(
     val quality: Int = DEFAULT_QUALITY,
     val maxDimension: Int? = DEFAULT_MAX_DIMENSION,
     val allowCachedMs: Long = 0L,
+    val annotate: Boolean = false,
 ) {
     fun validate(): CaptureOptions {
         if (quality !in 1..100) {
@@ -45,6 +47,7 @@ data class CaptureResult(
     val scale: Double,
     val rotation: Int,
     val timestampMs: Long,
+    val marks: List<UiMark>? = null,
 ) {
     fun toBase64Response(): ScreenshotResponse = ScreenshotResponse(
         format = format,
@@ -57,6 +60,7 @@ data class CaptureResult(
         rotation = rotation,
         timestampMs = timestampMs,
         dataBase64 = Base64.getEncoder().encodeToString(bytes),
+        marks = marks,
     )
 
     override fun equals(other: Any?): Boolean {
@@ -71,7 +75,8 @@ data class CaptureResult(
             displayHeight == other.displayHeight &&
             scale == other.scale &&
             rotation == other.rotation &&
-            timestampMs == other.timestampMs
+            timestampMs == other.timestampMs &&
+            marks == other.marks
     }
 
     override fun hashCode(): Int {
@@ -85,8 +90,21 @@ data class CaptureResult(
         result = 31 * result + scale.hashCode()
         result = 31 * result + rotation
         result = 31 * result + timestampMs.hashCode()
+        result = 31 * result + (marks?.hashCode() ?: 0)
         return result
     }
+}
+
+/**
+ * Renders Set-of-Mark (SoM) bounding boxes and numbered badges onto a captured screenshot.
+ */
+interface ScreenshotAnnotator {
+    fun annotate(capture: CaptureResult, marks: List<UiMark>): CaptureResult
+}
+
+object NoOpScreenshotAnnotator : ScreenshotAnnotator {
+    override fun annotate(capture: CaptureResult, marks: List<UiMark>): CaptureResult =
+        capture.copy(marks = marks)
 }
 
 /**
