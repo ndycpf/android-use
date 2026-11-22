@@ -121,3 +121,7 @@ Design notes are in [docs/adr](docs/adr/README.md).
 ```bash
 ./gradlew lint
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
