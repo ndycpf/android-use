@@ -8,4 +8,16 @@
     <string name="status_disconnected">Not enabled</string>
     <string name="open_accessibility_settings">Open Accessibility Settings</string>
     <string name="restricted_settings_hint">On Android 13+, sideloaded APKs require enabling "Allow restricted settings" in App Info before activating Accessibility Service.</string>
+
+    <string name="server_heading">Local HTTP Server</string>
+    <string name="server_status_stopped">Stopped</string>
+    <string name="server_status_running">Running (%1$s)</string>
+    <string name="server_status_error">Stopped (%1$s)</string>
+    <string name="start_server">Start Local Server</string>
+    <string name="stop_server">Stop Local Server</string>
+    <string name="adb_forward_hint">Connect from host:\nadb forward tcp:8765 tcp:8765\ncurl http://127.0.0.1:8765/v1/health</string>
+
+    <string name="server_notification_channel_name">android-use Local Server</string>
+    <string name="server_notification_title">android-use server running</string>
+    <string name="server_notification_text">Listening on %1$s</string>
 </resources>

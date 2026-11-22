@@ -2,6 +2,7 @@ package com.androiduse.protocol
 
 import kotlinx.serialization.encodeToString
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -39,6 +40,28 @@ class ProtocolModelsTest {
         assertEquals(original, decoded)
         assertTrue(encoded.contains("\"code\":\"ACCESSIBILITY_NOT_CONNECTED\""))
         assertTrue(encoded.contains("\"retryable\":true"))
+    }
+
+    @Test
+    fun `DeviceInfoResponse omits null foregroundPackage and round-trips`() {
+        val original = DeviceInfoResponse(
+            displayWidth = 1080,
+            displayHeight = 2400,
+            densityDpi = 420,
+            rotation = 0,
+            sdkInt = 35,
+            manufacturer = "Google",
+            model = "Pixel 9",
+            serverVersion = "0.1.0",
+            accessibilityConnected = true,
+            foregroundPackage = null,
+        )
+
+        val encoded = json.encodeToString(original)
+        val decoded = json.decodeFromString<DeviceInfoResponse>(encoded)
+
+        assertEquals(original, decoded)
+        assertFalse(encoded.contains("foregroundPackage"))
     }
 
     @Test

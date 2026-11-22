@@ -42,3 +42,17 @@ data class HealthResponse(
     val accessibilityConnected: Boolean,
     val version: String,
 )
+
+@Serializable
+data class DeviceInfoResponse(
+    val displayWidth: Int,
+    val displayHeight: Int,
+    val densityDpi: Int,
+    val rotation: Int,
+    val sdkInt: Int,
+    val manufacturer: String,
+    val model: String,
+    val serverVersion: String,
+    val accessibilityConnected: Boolean,
+    val foregroundPackage: String? = null,
+)
