@@ -310,7 +310,8 @@ class ServerForegroundService : Service() {
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(contentText)
-            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setColor(NOTIFICATION_ACCENT_COLOR)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -356,6 +357,7 @@ class ServerForegroundService : Service() {
 
         internal const val CHANNEL_ID: String = "android_use_server_status"
         internal const val NOTIFICATION_ID: Int = 1001
+        private const val NOTIFICATION_ACCENT_COLOR: Int = 0xFF0EA5E9.toInt()
         private const val DEFAULT_VERSION: String = "0.1.0"
         private const val IDLE_CHECK_INTERVAL_MS: Long = 5_000L
 

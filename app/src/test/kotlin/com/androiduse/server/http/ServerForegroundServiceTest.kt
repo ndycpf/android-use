@@ -39,6 +39,7 @@ class ServerForegroundServiceTest {
         val notification = service.buildNotification("100.64.1.2", 8765, session = null)
 
         assertTrue((notification.flags and Notification.FLAG_ONGOING_EVENT) != 0)
+        assertEquals(R.drawable.ic_notification, notification.smallIcon.resId)
         assertEquals(
             service.getString(R.string.server_notification_title),
             notification.extras.getString(Notification.EXTRA_TITLE),
