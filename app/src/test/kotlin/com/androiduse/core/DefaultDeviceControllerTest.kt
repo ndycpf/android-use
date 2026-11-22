@@ -54,6 +54,7 @@ class DefaultDeviceControllerTest {
             },
             inputDispatcher = RecordingInputDispatcher(),
             textInputController = RecordingTextInputController(),
+            appController = RecordingAppController(),
             serverVersion = "0.1.0",
             clockMs = { 99L },
         )
@@ -89,9 +90,11 @@ class DefaultDeviceControllerTest {
     }
 
     @Test
-    fun `tap, longPress, swipe, pressKey, and text actions delegate cleanly`() = runTest {
+    fun `tap, longPress, swipe, pressKey, text, apps, and overlay hooks delegate cleanly`() = runTest {
         val dispatcher = RecordingInputDispatcher()
         val textController = RecordingTextInputController()
+        val appController = RecordingAppController()
+        val overlay = RecordingOverlayFeedback()
         val controller = DefaultDeviceController(
             accessibilityRegistry = AccessibilityServiceRegistry(),
             deviceInfoProvider = object : DeviceInfoProvider {
@@ -105,9 +108,13 @@ class DefaultDeviceControllerTest {
             },
             inputDispatcher = dispatcher,
             textInputController = textController,
+            appController = appController,
+            overlayFeedback = overlay,
             serverVersion = "0.1.0",
             clockMs = { 500L },
         )
+
+        controller.captureScreenshot()
 
         val tapResp = controller.tap(
             TapRequest(
@@ -154,6 +161,15 @@ class DefaultDeviceControllerTest {
         assertEquals("ime", imeResp.action)
         assertTrue(imeResp.submitted)
 
+        val appsResp = controller.listApps("mail")
+        assertEquals(1, appsResp.count)
+
+        val launchResp = controller.launchApp(
+            com.androiduse.protocol.LaunchAppRequest(packageName = "com.google.android.gm"),
+        )
+        assertTrue(launchResp.ok)
+        assertEquals("com.google.android.gm", appController.lastLaunched?.packageName)
+
         assertEquals(
             listOf(
                 "tap:(540,1200):60",
@@ -167,12 +183,80 @@ class DefaultDeviceControllerTest {
             listOf("type:hello:clear=true:submit=true", "clear", "ime:enter"),
             textController.events,
         )
+        assertTrue(overlay.events.indexOf("beforeScreenshot") < overlay.events.indexOf("showCaptured"))
+        assertTrue(overlay.events.contains("tap:(540,1200):false"))
+        assertTrue(overlay.events.contains("swipe:(500,1800)->(500,600)"))
 
         try {
             controller.tap(TapRequest(x = 10.0, y = 10.0, durationMs = 5L))
             fail("Expected invalid duration error")
         } catch (e: AndroidUseException) {
             assertEquals(ErrorCode.INVALID_REQUEST, e.code)
+        }
+    }
+
+    @Test
+    fun `waitFor supports sleep, appear condition, gone condition, and timeout`() = runTest {
+        var pollCount = 0
+        var nowMs = 1_000L
+        val matchingNode = com.androiduse.protocol.UiNode(
+            nodeId = "n1",
+            text = "Done",
+            bounds = com.androiduse.protocol.UiBounds(0, 0, 100, 50),
+            center = UiPoint(50, 25),
+        )
+        val controller = DefaultDeviceController(
+            accessibilityRegistry = AccessibilityServiceRegistry(),
+            deviceInfoProvider = object : DeviceInfoProvider {
+                override fun getDeviceInfo(): DeviceInfoResponse = sampleDeviceInfo()
+            },
+            screenCapturer = object : ScreenCapturer {
+                override suspend fun capture(options: CaptureOptions): CaptureResult = sampleCapture()
+            },
+            uiTreeInspector = object : UiTreeInspector {
+                override suspend fun inspect(options: UiTreeOptions): UiTreeResponse {
+                    pollCount++
+                    nowMs += 100L
+                    val roots = if (pollCount == 2) listOf(matchingNode) else emptyList()
+                    return UiTreeResponse(
+                        packageName = "com.example",
+                        windowCount = 1,
+                        nodeCount = roots.size,
+                        timestampMs = nowMs,
+                        roots = roots,
+                    )
+                }
+            },
+            inputDispatcher = RecordingInputDispatcher(),
+            textInputController = RecordingTextInputController(),
+            appController = RecordingAppController(),
+            serverVersion = "0.1.0",
+            clockMs = { nowMs },
+        )
+
+        val appearResp = controller.waitFor(
+            com.androiduse.protocol.WaitRequest(text = "Done", timeoutMs = 1_000L, pollIntervalMs = 50L),
+        )
+        assertTrue(appearResp.ok)
+        assertEquals("n1", appearResp.matchedNode?.nodeId)
+        assertEquals(2, pollCount)
+
+        // Next poll (pollCount == 3) returns empty tree -> gone=true succeeds immediately.
+        val goneResp = controller.waitFor(
+            com.androiduse.protocol.WaitRequest(text = "Done", gone = true, timeoutMs = 1_000L, pollIntervalMs = 50L),
+        )
+        assertTrue(goneResp.ok)
+        assertNull(goneResp.matchedNode)
+
+        // Timeout when condition never matches.
+        try {
+            controller.waitFor(
+                com.androiduse.protocol.WaitRequest(text = "Never", timeoutMs = 250L, pollIntervalMs = 50L),
+            )
+            fail("Expected WAIT_TIMEOUT")
+        } catch (e: AndroidUseException) {
+            assertEquals(ErrorCode.WAIT_TIMEOUT, e.code)
+            assertEquals(408, e.httpStatus)
         }
     }
 
@@ -191,6 +275,7 @@ class DefaultDeviceControllerTest {
             },
             inputDispatcher = RecordingInputDispatcher(),
             textInputController = RecordingTextInputController(),
+            appController = RecordingAppController(),
             serverVersion = "0.1.0",
         )
         val events = mutableListOf<String>()
@@ -289,6 +374,49 @@ class DefaultDeviceControllerTest {
         override suspend fun performImeAction(request: com.androiduse.protocol.ImeActionRequest): TextInputResult {
             events += "ime:${request.action}"
             return TextInputResult(method = "ime_enter", submitted = true)
+        }
+    }
+
+    private class RecordingAppController : AppController {
+        var lastLaunched: com.androiduse.protocol.LaunchAppRequest? = null
+
+        override suspend fun listLaunchableApps(query: String?): com.androiduse.protocol.AppsListResponse {
+            return com.androiduse.protocol.AppsListResponse(
+                count = 1,
+                apps = listOf(com.androiduse.protocol.AppInfo("com.google.android.gm", "Gmail")),
+            )
+        }
+
+        override suspend fun launchApp(request: com.androiduse.protocol.LaunchAppRequest) {
+            lastLaunched = request
+        }
+    }
+
+    private class RecordingOverlayFeedback : ActionOverlayFeedback {
+        val events = mutableListOf<String>()
+
+        override suspend fun beforeScreenshot() {
+            events += "beforeScreenshot"
+        }
+
+        override fun showCaptured() {
+            events += "showCaptured"
+        }
+
+        override fun showTap(point: UiPoint, longPress: Boolean) {
+            events += "tap:(${point.x},${point.y}):$longPress"
+        }
+
+        override fun showSwipe(start: UiPoint, end: UiPoint) {
+            events += "swipe:(${start.x},${start.y})->(${end.x},${end.y})"
+        }
+
+        override fun showStatus(label: String) {
+            events += "status:$label"
+        }
+
+        override fun clear() {
+            events += "clear"
         }
     }
 }

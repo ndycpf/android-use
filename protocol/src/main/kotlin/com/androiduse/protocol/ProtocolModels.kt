@@ -23,6 +23,8 @@ enum class ErrorCode {
     SCREENSHOT_FAILED,
     SCREENSHOT_RATE_LIMITED,
     NO_FOCUSED_INPUT,
+    APP_NOT_FOUND,
+    WAIT_TIMEOUT,
     ACTION_FAILED,
     UNSUPPORTED_OPERATION,
     INTERNAL_ERROR,
@@ -244,5 +246,50 @@ data class TextActionResponse(
     val action: String,
     val method: String? = null,
     val submitted: Boolean = false,
+    val timestampMs: Long,
+)
+
+@Serializable
+data class AppInfo(
+    val packageName: String,
+    val label: String,
+)
+
+@Serializable
+data class AppsListResponse(
+    val count: Int,
+    val apps: List<AppInfo>,
+)
+
+@Serializable
+data class LaunchAppRequest(
+    val packageName: String? = null,
+    val uri: String? = null,
+)
+
+@Serializable
+data class LaunchAppResponse(
+    val ok: Boolean,
+    val packageName: String? = null,
+    val uri: String? = null,
+    val timestampMs: Long,
+)
+
+@Serializable
+data class WaitRequest(
+    val durationMs: Long? = null,
+    val text: String? = null,
+    val resourceId: String? = null,
+    val gone: Boolean = false,
+    val timeoutMs: Long = 10_000L,
+    val pollIntervalMs: Long = 250L,
+)
+
+@Serializable
+data class WaitResponse(
+    val ok: Boolean,
+    val matched: Boolean,
+    val elapsedMs: Long,
+    val matchedNode: UiNode? = null,
     val timestampMs: Long,
 )

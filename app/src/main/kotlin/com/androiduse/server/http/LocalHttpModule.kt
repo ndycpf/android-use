@@ -230,6 +230,23 @@ fun Application.configureAndroidUseHttp(
                     call.respond(controller.performImeAction(request))
                 }
             }
+
+            route("/apps") {
+                get {
+                    val query = call.request.queryParameters["q"]
+                    call.respond(controller.listApps(query))
+                }
+
+                post("/launch") {
+                    val request = call.receive<com.androiduse.protocol.LaunchAppRequest>()
+                    call.respond(controller.launchApp(request))
+                }
+            }
+
+            post("/wait") {
+                val request = call.receive<com.androiduse.protocol.WaitRequest>()
+                call.respond(controller.waitFor(request))
+            }
         }
     }
 }

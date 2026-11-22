@@ -1,11 +1,14 @@
 package com.androiduse.core
 
 import com.androiduse.protocol.ActionResponse
+import com.androiduse.protocol.AppsListResponse
 import com.androiduse.protocol.ClearTextRequest
 import com.androiduse.protocol.DeviceInfoResponse
 import com.androiduse.protocol.HealthResponse
 import com.androiduse.protocol.ImeActionRequest
 import com.androiduse.protocol.KeyRequest
+import com.androiduse.protocol.LaunchAppRequest
+import com.androiduse.protocol.LaunchAppResponse
 import com.androiduse.protocol.LongPressRequest
 import com.androiduse.protocol.ScreenStateResponse
 import com.androiduse.protocol.SwipeRequest
@@ -13,6 +16,9 @@ import com.androiduse.protocol.TapRequest
 import com.androiduse.protocol.TextActionResponse
 import com.androiduse.protocol.TypeTextRequest
 import com.androiduse.protocol.UiTreeResponse
+import com.androiduse.protocol.WaitRequest
+import com.androiduse.protocol.WaitResponse
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -41,6 +47,9 @@ interface DeviceController {
     suspend fun typeText(request: TypeTextRequest): TextActionResponse
     suspend fun clearText(request: ClearTextRequest = ClearTextRequest()): TextActionResponse
     suspend fun performImeAction(request: ImeActionRequest = ImeActionRequest()): TextActionResponse
+    suspend fun listApps(query: String? = null): AppsListResponse
+    suspend fun launchApp(request: LaunchAppRequest): LaunchAppResponse
+    suspend fun waitFor(request: WaitRequest): WaitResponse
 }
 
 class DefaultDeviceController(
@@ -50,6 +59,8 @@ class DefaultDeviceController(
     private val uiTreeInspector: UiTreeInspector,
     private val inputDispatcher: InputDispatcher,
     private val textInputController: TextInputController,
+    private val appController: AppController,
+    private val overlayFeedback: ActionOverlayFeedback = NoOpActionOverlayFeedback,
     private val serverVersion: String,
     private val clockMs: () -> Long = { System.currentTimeMillis() },
 ) : DeviceController {
@@ -69,7 +80,10 @@ class DefaultDeviceController(
     }
 
     override suspend fun captureScreenshot(options: CaptureOptions): CaptureResult {
-        return screenCapturer.capture(options)
+        overlayFeedback.beforeScreenshot()
+        val result = screenCapturer.capture(options)
+        overlayFeedback.showCaptured()
+        return result
     }
 
     override suspend fun getUiTree(options: UiTreeOptions): UiTreeResponse {
@@ -109,6 +123,7 @@ class DefaultDeviceController(
                 imageWidth = request.imageWidth,
                 imageHeight = request.imageHeight,
             )
+            overlayFeedback.showTap(point = point, longPress = false)
             inputDispatcher.tap(point = point, durationMs = request.durationMs)
             ActionResponse(
                 ok = true,
@@ -133,6 +148,7 @@ class DefaultDeviceController(
                 imageWidth = request.imageWidth,
                 imageHeight = request.imageHeight,
             )
+            overlayFeedback.showTap(point = point, longPress = true)
             inputDispatcher.longPress(point = point, durationMs = request.durationMs)
             ActionResponse(
                 ok = true,
@@ -166,6 +182,7 @@ class DefaultDeviceController(
                 imageWidth = request.imageWidth,
                 imageHeight = request.imageHeight,
             )
+            overlayFeedback.showSwipe(start = start, end = end)
             inputDispatcher.swipe(start = start, end = end, durationMs = request.durationMs)
             ActionResponse(
                 ok = true,
@@ -180,6 +197,7 @@ class DefaultDeviceController(
 
     override suspend fun pressKey(request: KeyRequest): ActionResponse {
         return withActionLock {
+            overlayFeedback.showStatus("Key: ${request.key.name}")
             inputDispatcher.pressGlobalKey(request.key)
             ActionResponse(
                 ok = true,
@@ -192,6 +210,7 @@ class DefaultDeviceController(
 
     override suspend fun typeText(request: TypeTextRequest): TextActionResponse {
         return withActionLock {
+            overlayFeedback.showStatus("Typing...")
             val result = textInputController.typeText(request)
             TextActionResponse(
                 ok = true,
@@ -205,6 +224,7 @@ class DefaultDeviceController(
 
     override suspend fun clearText(request: ClearTextRequest): TextActionResponse {
         return withActionLock {
+            overlayFeedback.showStatus("Clear text")
             val result = textInputController.clearText()
             TextActionResponse(
                 ok = true,
@@ -218,6 +238,7 @@ class DefaultDeviceController(
 
     override suspend fun performImeAction(request: ImeActionRequest): TextActionResponse {
         return withActionLock {
+            overlayFeedback.showStatus("IME: ${request.action}")
             val result = textInputController.performImeAction(request)
             TextActionResponse(
                 ok = true,
@@ -226,6 +247,98 @@ class DefaultDeviceController(
                 submitted = result.submitted,
                 timestampMs = clockMs(),
             )
+        }
+    }
+
+    override suspend fun listApps(query: String?): AppsListResponse {
+        return appController.listLaunchableApps(query)
+    }
+
+    override suspend fun launchApp(request: LaunchAppRequest): LaunchAppResponse {
+        val pkg = request.packageName?.trim()?.takeIf { it.isNotEmpty() }
+        val uri = request.uri?.trim()?.takeIf { it.isNotEmpty() }
+        if (pkg == null && uri == null) {
+            throw AndroidUseException.invalidRequest("Either 'packageName' or 'uri' must be provided.")
+        }
+        return withActionLock {
+            overlayFeedback.showStatus("Launch: ${pkg ?: uri}")
+            appController.launchApp(LaunchAppRequest(packageName = pkg, uri = uri))
+            LaunchAppResponse(
+                ok = true,
+                packageName = pkg,
+                uri = uri,
+                timestampMs = clockMs(),
+            )
+        }
+    }
+
+    override suspend fun waitFor(request: WaitRequest): WaitResponse {
+        val hasText = !request.text.isNullOrEmpty()
+        val hasResId = !request.resourceId.isNullOrEmpty()
+        val hasCondition = hasText || hasResId
+
+        if (!hasCondition && request.durationMs == null) {
+            throw AndroidUseException.invalidRequest(
+                "Provide 'durationMs' for a sleep wait, or 'text'/'resourceId' for a condition wait.",
+            )
+        }
+
+        val startMs = clockMs()
+
+        if (!hasCondition) {
+            val sleepMs = request.durationMs!!
+            validateDuration(sleepMs, minMs = 0L, maxMs = MAX_SLEEP_MS, name = "durationMs")
+            if (sleepMs > 0L) {
+                delay(sleepMs)
+            }
+            val now = clockMs()
+            return WaitResponse(
+                ok = true,
+                matched = true,
+                elapsedMs = (now - startMs).coerceAtLeast(0L),
+                matchedNode = null,
+                timestampMs = now,
+            )
+        }
+
+        validateDuration(request.timeoutMs, minMs = 100L, maxMs = MAX_WAIT_TIMEOUT_MS, name = "timeoutMs")
+        validateDuration(request.pollIntervalMs, minMs = 50L, maxMs = MAX_POLL_INTERVAL_MS, name = "pollIntervalMs")
+
+        while (true) {
+            val tree = uiTreeInspector.inspect(UiTreeOptions())
+            val matched = UiTreeMatcher.findFirstMatch(
+                roots = tree.roots,
+                text = request.text,
+                resourceId = request.resourceId,
+            )
+            val satisfied = if (request.gone) matched == null else matched != null
+            val now = clockMs()
+            val elapsed = (now - startMs).coerceAtLeast(0L)
+
+            if (satisfied) {
+                return WaitResponse(
+                    ok = true,
+                    matched = true,
+                    elapsedMs = elapsed,
+                    matchedNode = if (request.gone) null else matched,
+                    timestampMs = now,
+                )
+            }
+
+            if (elapsed >= request.timeoutMs) {
+                val targetDesc = buildString {
+                    if (hasText) append("text='${request.text}'")
+                    if (hasText && hasResId) append(" and ")
+                    if (hasResId) append("resourceId='${request.resourceId}'")
+                }
+                val verb = if (request.gone) "disappear" else "appear"
+                throw AndroidUseException.waitTimeout(
+                    "Timed out after ${request.timeoutMs}ms waiting for $targetDesc to $verb.",
+                )
+            }
+
+            val remaining = (request.timeoutMs - elapsed).coerceAtLeast(1L)
+            delay(minOf(request.pollIntervalMs, remaining))
         }
     }
 
@@ -242,5 +355,11 @@ class DefaultDeviceController(
      */
     internal suspend fun <T> withActionLock(block: suspend () -> T): T {
         return actionMutex.withLock { block() }
+    }
+
+    companion object {
+        private const val MAX_SLEEP_MS: Long = 30_000L
+        private const val MAX_WAIT_TIMEOUT_MS: Long = 60_000L
+        private const val MAX_POLL_INTERVAL_MS: Long = 2_000L
     }
 }

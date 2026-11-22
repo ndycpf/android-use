@@ -28,6 +28,7 @@
     <string name="rotate_token">Rotate Token</string>
     <string name="copy_command">Copy curl Command</string>
     <string name="copied_toast">Copied to clipboard</string>
+    <string name="overlay_switch_label">Visual action overlay (tap, swipe &amp; capture indicator)</string>
 
     <string name="server_notification_channel_name">android-use Local Server</string>
     <string name="server_notification_title">android-use server running</string>

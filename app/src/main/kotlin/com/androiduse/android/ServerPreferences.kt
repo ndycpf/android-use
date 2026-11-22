@@ -34,10 +34,17 @@ class ServerPreferences(context: Context) {
         return token
     }
 
+    fun isOverlayEnabled(): Boolean = prefs.getBoolean(KEY_OVERLAY_ENABLED, true)
+
+    fun setOverlayEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_OVERLAY_ENABLED, enabled).apply()
+    }
+
     companion object {
         private const val PREFS_NAME = "android_use_server_prefs"
         private const val KEY_BIND_MODE = "bind_mode"
         private const val KEY_AUTH_TOKEN = "auth_token"
+        private const val KEY_OVERLAY_ENABLED = "overlay_enabled"
         private val secureRandom = SecureRandom()
 
         fun generateToken(): String {

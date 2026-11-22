@@ -32,6 +32,7 @@ class ServerForegroundService : Service() {
     internal var accessibilityRegistry: AccessibilityServiceRegistry = AccessibilityServiceRegistry.default
 
     private var httpServer: LocalHttpServer? = null
+    private var overlayController: com.androiduse.android.AccessibilityOverlayController? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -54,6 +55,8 @@ class ServerForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        overlayController?.clear()
+        overlayController = null
         httpServer?.stop()
         httpServer = null
         if (serverStateRegistry.state.value.running) {
@@ -77,11 +80,12 @@ class ServerForegroundService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
+        val prefs = ServerPreferences(applicationContext)
         val authToken = if (NetworkAddressHelper.isLoopbackHost(host)) {
             null
         } else {
             explicitToken?.takeIf { it.isNotBlank() }
-                ?: ServerPreferences(applicationContext).getOrCreateAuthToken()
+                ?: prefs.getOrCreateAuthToken()
         }
 
         val versionName = runCatching {
@@ -109,6 +113,15 @@ class ServerForegroundService : Service() {
             context = applicationContext,
             accessibilityRegistry = accessibilityRegistry,
         )
+        val appController = com.androiduse.android.AndroidAppController(
+            context = applicationContext,
+        )
+        val overlay = com.androiduse.android.AccessibilityOverlayController(
+            accessibilityRegistry = accessibilityRegistry,
+            isEnabledProvider = { prefs.isOverlayEnabled() },
+        )
+        overlayController = overlay
+
         val controller = DefaultDeviceController(
             accessibilityRegistry = accessibilityRegistry,
             deviceInfoProvider = deviceInfoProvider,
@@ -116,6 +129,8 @@ class ServerForegroundService : Service() {
             uiTreeInspector = uiTreeInspector,
             inputDispatcher = inputDispatcher,
             textInputController = textInputController,
+            appController = appController,
+            overlayFeedback = overlay,
             serverVersion = versionName,
         )
 
@@ -134,6 +149,8 @@ class ServerForegroundService : Service() {
                 authRequired = authToken != null,
             )
         } catch (e: Throwable) {
+            overlay.clear()
+            overlayController = null
             server.stop()
             serverStateRegistry.markStopped(e.message ?: "Failed to start local HTTP server.")
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -142,6 +159,8 @@ class ServerForegroundService : Service() {
     }
 
     private fun stopServerAndSelf() {
+        overlayController?.clear()
+        overlayController = null
         httpServer?.stop()
         httpServer = null
         serverStateRegistry.markStopped()

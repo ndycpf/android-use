@@ -173,4 +173,49 @@ class UiTreeNormalizerTest {
         assertTrue(cappedDepth.truncated)
         assertTrue(cappedDepth.roots[0].children[0].children.isEmpty())
     }
+
+    @Test
+    fun `collapses resourceId-only decorative wrappers and omits redundant child packageName`() {
+        val raw = RawUiNode(
+            packageName = "com.google.android.gm",
+            className = "android.widget.FrameLayout",
+            resourceId = "com.google.android.gm:id/action_bar_root",
+            bounds = UiBounds(0, 0, 1080, 2520),
+            children = listOf(
+                RawUiNode(
+                    packageName = "com.google.android.gm",
+                    className = "android.view.View",
+                    resourceId = "com.google.android.gm:id/scrim_behind",
+                    bounds = UiBounds(0, 0, 1080, 2520),
+                ),
+                RawUiNode(
+                    packageName = "com.google.android.gm",
+                    className = "android.widget.Button",
+                    resourceId = "com.google.android.gm:id/compose_button",
+                    text = "作成",
+                    bounds = UiBounds(777, 2292, 1017, 2439),
+                    clickable = true,
+                ),
+                RawUiNode(
+                    packageName = "com.android.systemui",
+                    className = "android.widget.TextView",
+                    text = "46%",
+                    bounds = UiBounds(500, 10, 600, 50),
+                ),
+            ),
+        )
+
+        val response = UiTreeNormalizer.normalize(
+            rawRoots = listOf(raw),
+            options = UiTreeOptions(pruneEmptyContainers = true),
+            timestampMs = 100L,
+        )
+
+        assertEquals("com.google.android.gm", response.packageName)
+        assertEquals(2, response.nodeCount)
+        assertEquals("作成", response.roots[0].text)
+        assertEquals(null, response.roots[0].packageName)
+        assertEquals("46%", response.roots[1].text)
+        assertEquals("com.android.systemui", response.roots[1].packageName)
+    }
 }

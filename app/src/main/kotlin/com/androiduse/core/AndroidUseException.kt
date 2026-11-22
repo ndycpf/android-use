@@ -78,5 +78,23 @@ class AndroidUseException(
             httpStatus = 409,
             retryable = true,
         )
+
+        fun appNotFound(
+            packageName: String,
+        ): AndroidUseException = AndroidUseException(
+            code = ErrorCode.APP_NOT_FOUND,
+            message = "No launchable app found for package '$packageName'.",
+            httpStatus = 404,
+            retryable = false,
+        )
+
+        fun waitTimeout(
+            message: String,
+        ): AndroidUseException = AndroidUseException(
+            code = ErrorCode.WAIT_TIMEOUT,
+            message = message,
+            httpStatus = 408,
+            retryable = true,
+        )
     }
 }

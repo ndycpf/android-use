@@ -6,6 +6,11 @@ import com.androiduse.protocol.UiTreeResponse
 /**
  * Normalizes and prunes raw accessibility node snapshots into a compact, AI-friendly
  * [UiTreeResponse] with deterministic pre-order node IDs (`n1`, `n2`, ...).
+ *
+ * Per ADR-0005 Phase 6 optimization:
+ * - Non-interactive layout wrappers with only a `resourceId` (no text, contentDescription,
+ *   hintText, or interactive flags) are collapsed when [UiTreeOptions.pruneEmptyContainers] is true.
+ * - Redundant `packageName` values matching the root response `packageName` are omitted on nodes.
  */
 object UiTreeNormalizer {
 
@@ -59,6 +64,8 @@ object UiTreeNormalizer {
             prunedRoots += prune(root, depth = 0)
         }
 
+        val activePackage = rawRoots.firstOrNull()?.packageName?.takeIf { it.isNotBlank() }
+
         // Second pass: assign dense pre-order IDs and enforce maxNodes budget.
         var assignedCount = 0
         fun materialize(node: IntermediateNode): UiNode? {
@@ -78,9 +85,12 @@ object UiTreeNormalizer {
                 }
             }
             val raw = node.raw
+            val rawPkg = raw.packageName?.takeIf { it.isNotBlank() }
+            val nodePackage = if (rawPkg != null && rawPkg != activePackage) rawPkg else null
+
             return UiNode(
                 nodeId = id,
-                packageName = raw.packageName?.takeIf { it.isNotBlank() },
+                packageName = nodePackage,
                 className = raw.className?.takeIf { it.isNotBlank() },
                 resourceId = raw.resourceId?.takeIf { it.isNotBlank() },
                 text = raw.text?.takeIf { it.isNotBlank() },
@@ -112,9 +122,6 @@ object UiTreeNormalizer {
             }
         }
 
-        val activePackage = rawRoots.firstOrNull()?.packageName?.takeIf { it.isNotBlank() }
-            ?: finalRoots.firstOrNull()?.packageName
-
         return UiTreeResponse(
             packageName = activePackage,
             windowCount = windowCount,
@@ -129,7 +136,6 @@ object UiTreeNormalizer {
         return !node.text.isNullOrBlank() ||
             !node.contentDescription.isNullOrBlank() ||
             !node.hintText.isNullOrBlank() ||
-            !node.resourceId.isNullOrBlank() ||
             node.clickable ||
             node.longClickable ||
             node.editable ||

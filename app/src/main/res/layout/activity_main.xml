@@ -106,6 +106,14 @@
             android:layout_marginTop="12dp"
             android:text="@string/start_server" />
 
+        <Switch
+            android:id="@+id/overlaySwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:checked="true"
+            android:text="@string/overlay_switch_label" />
+
         <LinearLayout
             android:id="@+id/authTokenContainer"
             android:layout_width="match_parent"

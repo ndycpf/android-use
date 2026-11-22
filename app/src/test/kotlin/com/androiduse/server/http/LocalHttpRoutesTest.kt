@@ -685,5 +685,64 @@ class LocalHttpRoutesTest {
                 timestampMs = 10L,
             )
         }
+
+        override suspend fun listApps(query: String?): com.androiduse.protocol.AppsListResponse {
+            return com.androiduse.protocol.AppsListResponse(
+                count = 1,
+                apps = listOf(com.androiduse.protocol.AppInfo("com.google.android.gm", "Gmail")),
+            )
+        }
+
+        override suspend fun launchApp(
+            request: com.androiduse.protocol.LaunchAppRequest,
+        ): com.androiduse.protocol.LaunchAppResponse {
+            return com.androiduse.protocol.LaunchAppResponse(
+                ok = true,
+                packageName = request.packageName,
+                uri = request.uri,
+                timestampMs = 11L,
+            )
+        }
+
+        override suspend fun waitFor(
+            request: com.androiduse.protocol.WaitRequest,
+        ): com.androiduse.protocol.WaitResponse {
+            return com.androiduse.protocol.WaitResponse(
+                ok = true,
+                matched = true,
+                elapsedMs = 120L,
+                matchedNode = uiTreeResponse.roots.firstOrNull(),
+                timestampMs = 12L,
+            )
+        }
+    }
+
+    @Test
+    fun `GET v1 apps, POST v1 apps launch, and POST v1 wait return expected JSON`() = testApplication {
+        application {
+            configureAndroidUseHttp(FakeDeviceController())
+        }
+
+        val appsRes = client.get("/v1/apps?q=gmail")
+        assertEquals(HttpStatusCode.OK, appsRes.status)
+        val appsBody = json.decodeFromString<com.androiduse.protocol.AppsListResponse>(appsRes.bodyAsText())
+        assertEquals(1, appsBody.count)
+        assertEquals("com.google.android.gm", appsBody.apps.first().packageName)
+
+        val launchRes = client.post("/v1/apps/launch") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"packageName":"com.google.android.gm"}""")
+        }
+        assertEquals(HttpStatusCode.OK, launchRes.status)
+        assertTrue(json.decodeFromString<com.androiduse.protocol.LaunchAppResponse>(launchRes.bodyAsText()).ok)
+
+        val waitRes = client.post("/v1/wait") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"text":"Search","timeoutMs":2000}""")
+        }
+        assertEquals(HttpStatusCode.OK, waitRes.status)
+        val waitBody = json.decodeFromString<com.androiduse.protocol.WaitResponse>(waitRes.bodyAsText())
+        assertTrue(waitBody.matched)
+        assertEquals("n1", waitBody.matchedNode?.nodeId)
     }
 }

@@ -112,6 +112,12 @@ class MainActivity : Activity() {
             Toast.makeText(this, R.string.copied_toast, Toast.LENGTH_SHORT).show()
         }
 
+        val overlaySwitch = findViewById<android.widget.Switch>(R.id.overlaySwitch)
+        overlaySwitch.isChecked = prefs.isOverlayEnabled()
+        overlaySwitch.setOnCheckedChangeListener { _, isChecked ->
+            prefs.setOverlayEnabled(isChecked)
+        }
+
         toggleServerButton.setOnClickListener {
             if (serverStateRegistry.state.value.running) {
                 startService(ServerForegroundService.stopIntent(this))
