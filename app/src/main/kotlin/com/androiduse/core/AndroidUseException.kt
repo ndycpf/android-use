@@ -69,5 +69,14 @@ class AndroidUseException(
             retryable = retryable,
             cause = cause,
         )
+
+        fun noFocusedInput(
+            message: String = "No focused editable input field found. Tap an input field first.",
+        ): AndroidUseException = AndroidUseException(
+            code = ErrorCode.NO_FOCUSED_INPUT,
+            message = message,
+            httpStatus = 409,
+            retryable = true,
+        )
     }
 }

@@ -465,6 +465,55 @@ class LocalHttpRoutesTest {
         )
     }
 
+    @Test
+    fun `POST v1 actions type, clear, and ime handle payloads, empty bodies, and 409 NO_FOCUSED_INPUT`() = testApplication {
+        val controller = FakeDeviceController()
+        application {
+            configureAndroidUseHttp(controller)
+        }
+
+        val typeRes = client.post("/v1/actions/type") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"text":"hello world","clearFirst":true,"submit":true}""")
+        }
+        assertEquals(HttpStatusCode.OK, typeRes.status)
+        val typeBody = json.decodeFromString<com.androiduse.protocol.TextActionResponse>(typeRes.bodyAsText())
+        assertEquals("type", typeBody.action)
+        assertEquals("set_text", typeBody.method)
+        assertTrue(typeBody.submitted)
+        assertEquals("hello world", controller.lastTypeRequest?.text)
+        assertTrue(controller.lastTypeRequest?.clearFirst == true)
+
+        val clearRes = client.post("/v1/actions/clear")
+        assertEquals(HttpStatusCode.OK, clearRes.status)
+        assertEquals(
+            "clear",
+            json.decodeFromString<com.androiduse.protocol.TextActionResponse>(clearRes.bodyAsText()).action,
+        )
+
+        val imeRes = client.post("/v1/actions/ime")
+        assertEquals(HttpStatusCode.OK, imeRes.status)
+        assertEquals("enter", controller.lastImeRequest?.action)
+
+        val noFocusController = FakeDeviceController(
+            typeError = AndroidUseException.noFocusedInput(),
+        )
+        testApplication {
+            application {
+                configureAndroidUseHttp(noFocusController)
+            }
+            val res = client.post("/v1/actions/type") {
+                contentType(ContentType.Application.Json)
+                setBody("""{"text":"abc"}""")
+            }
+            assertEquals(HttpStatusCode.Conflict, res.status)
+            assertEquals(
+                ErrorCode.NO_FOCUSED_INPUT,
+                json.decodeFromString<ErrorResponse>(res.bodyAsText()).error.code,
+            )
+        }
+    }
+
     private class FakeDeviceController(
         private val health: HealthResponse = HealthResponse("ok", false, "0.1.0"),
         private val deviceInfo: DeviceInfoResponse = DeviceInfoResponse(
@@ -492,6 +541,7 @@ class LocalHttpRoutesTest {
             timestampMs = 1L,
         ),
         private val screenshotError: Throwable? = null,
+        private val typeError: Throwable? = null,
         private val uiTreeResponse: UiTreeResponse = UiTreeResponse(
             packageName = "com.example.home",
             windowCount = 1,
@@ -516,6 +566,8 @@ class LocalHttpRoutesTest {
         var lastLongPressRequest: LongPressRequest? = null
         var lastSwipeRequest: SwipeRequest? = null
         var lastKeyRequest: KeyRequest? = null
+        var lastTypeRequest: com.androiduse.protocol.TypeTextRequest? = null
+        var lastImeRequest: com.androiduse.protocol.ImeActionRequest? = null
 
         override suspend fun getHealth(): HealthResponse = health
 
@@ -592,6 +644,45 @@ class LocalHttpRoutesTest {
                 action = "key",
                 durationMs = 0L,
                 timestampMs = 7L,
+            )
+        }
+
+        override suspend fun typeText(
+            request: com.androiduse.protocol.TypeTextRequest,
+        ): com.androiduse.protocol.TextActionResponse {
+            lastTypeRequest = request
+            typeError?.let { throw it }
+            return com.androiduse.protocol.TextActionResponse(
+                ok = true,
+                action = "type",
+                method = "set_text",
+                submitted = request.submit,
+                timestampMs = 8L,
+            )
+        }
+
+        override suspend fun clearText(
+            request: com.androiduse.protocol.ClearTextRequest,
+        ): com.androiduse.protocol.TextActionResponse {
+            return com.androiduse.protocol.TextActionResponse(
+                ok = true,
+                action = "clear",
+                method = "set_text",
+                submitted = false,
+                timestampMs = 9L,
+            )
+        }
+
+        override suspend fun performImeAction(
+            request: com.androiduse.protocol.ImeActionRequest,
+        ): com.androiduse.protocol.TextActionResponse {
+            lastImeRequest = request
+            return com.androiduse.protocol.TextActionResponse(
+                ok = true,
+                action = "ime",
+                method = "ime_enter",
+                submitted = true,
+                timestampMs = 10L,
             )
         }
     }

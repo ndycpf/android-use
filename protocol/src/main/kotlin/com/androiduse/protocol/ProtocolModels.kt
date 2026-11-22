@@ -22,6 +22,7 @@ enum class ErrorCode {
     INVALID_REQUEST,
     SCREENSHOT_FAILED,
     SCREENSHOT_RATE_LIMITED,
+    NO_FOCUSED_INPUT,
     ACTION_FAILED,
     UNSUPPORTED_OPERATION,
     INTERNAL_ERROR,
@@ -216,5 +217,32 @@ data class ActionResponse(
     val resolvedPoint: UiPoint? = null,
     val resolvedEndPoint: UiPoint? = null,
     val durationMs: Long,
+    val timestampMs: Long,
+)
+
+@Serializable
+data class TypeTextRequest(
+    val text: String,
+    val clearFirst: Boolean = false,
+    val submit: Boolean = false,
+    val useClipboardFallback: Boolean = true,
+)
+
+@Serializable
+data class ClearTextRequest(
+    val useClipboardFallback: Boolean = false,
+)
+
+@Serializable
+data class ImeActionRequest(
+    val action: String = "enter",
+)
+
+@Serializable
+data class TextActionResponse(
+    val ok: Boolean,
+    val action: String,
+    val method: String? = null,
+    val submitted: Boolean = false,
     val timestampMs: Long,
 )

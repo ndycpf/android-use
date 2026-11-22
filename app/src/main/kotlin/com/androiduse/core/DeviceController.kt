@@ -1,13 +1,17 @@
 package com.androiduse.core
 
 import com.androiduse.protocol.ActionResponse
+import com.androiduse.protocol.ClearTextRequest
 import com.androiduse.protocol.DeviceInfoResponse
 import com.androiduse.protocol.HealthResponse
+import com.androiduse.protocol.ImeActionRequest
 import com.androiduse.protocol.KeyRequest
 import com.androiduse.protocol.LongPressRequest
 import com.androiduse.protocol.ScreenStateResponse
 import com.androiduse.protocol.SwipeRequest
 import com.androiduse.protocol.TapRequest
+import com.androiduse.protocol.TextActionResponse
+import com.androiduse.protocol.TypeTextRequest
 import com.androiduse.protocol.UiTreeResponse
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -34,6 +38,9 @@ interface DeviceController {
     suspend fun longPress(request: LongPressRequest): ActionResponse
     suspend fun swipe(request: SwipeRequest): ActionResponse
     suspend fun pressKey(request: KeyRequest): ActionResponse
+    suspend fun typeText(request: TypeTextRequest): TextActionResponse
+    suspend fun clearText(request: ClearTextRequest = ClearTextRequest()): TextActionResponse
+    suspend fun performImeAction(request: ImeActionRequest = ImeActionRequest()): TextActionResponse
 }
 
 class DefaultDeviceController(
@@ -42,6 +49,7 @@ class DefaultDeviceController(
     private val screenCapturer: ScreenCapturer,
     private val uiTreeInspector: UiTreeInspector,
     private val inputDispatcher: InputDispatcher,
+    private val textInputController: TextInputController,
     private val serverVersion: String,
     private val clockMs: () -> Long = { System.currentTimeMillis() },
 ) : DeviceController {
@@ -177,6 +185,45 @@ class DefaultDeviceController(
                 ok = true,
                 action = "key",
                 durationMs = 0L,
+                timestampMs = clockMs(),
+            )
+        }
+    }
+
+    override suspend fun typeText(request: TypeTextRequest): TextActionResponse {
+        return withActionLock {
+            val result = textInputController.typeText(request)
+            TextActionResponse(
+                ok = true,
+                action = "type",
+                method = result.method,
+                submitted = result.submitted,
+                timestampMs = clockMs(),
+            )
+        }
+    }
+
+    override suspend fun clearText(request: ClearTextRequest): TextActionResponse {
+        return withActionLock {
+            val result = textInputController.clearText()
+            TextActionResponse(
+                ok = true,
+                action = "clear",
+                method = result.method,
+                submitted = false,
+                timestampMs = clockMs(),
+            )
+        }
+    }
+
+    override suspend fun performImeAction(request: ImeActionRequest): TextActionResponse {
+        return withActionLock {
+            val result = textInputController.performImeAction(request)
+            TextActionResponse(
+                ok = true,
+                action = "ime",
+                method = result.method,
+                submitted = result.submitted,
                 timestampMs = clockMs(),
             )
         }

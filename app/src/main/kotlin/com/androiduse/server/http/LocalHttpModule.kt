@@ -26,6 +26,7 @@ import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.header
 import io.ktor.server.request.receive
+import io.ktor.server.request.receiveText
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
@@ -202,6 +203,31 @@ fun Application.configureAndroidUseHttp(
                 post("/key") {
                     val request = call.receive<KeyRequest>()
                     call.respond(controller.pressKey(request))
+                }
+
+                post("/type") {
+                    val request = call.receive<com.androiduse.protocol.TypeTextRequest>()
+                    call.respond(controller.typeText(request))
+                }
+
+                post("/clear") {
+                    val raw = call.receiveText().trim()
+                    val request = if (raw.isEmpty()) {
+                        com.androiduse.protocol.ClearTextRequest()
+                    } else {
+                        ProtocolJson.instance.decodeFromString<com.androiduse.protocol.ClearTextRequest>(raw)
+                    }
+                    call.respond(controller.clearText(request))
+                }
+
+                post("/ime") {
+                    val raw = call.receiveText().trim()
+                    val request = if (raw.isEmpty()) {
+                        com.androiduse.protocol.ImeActionRequest()
+                    } else {
+                        ProtocolJson.instance.decodeFromString<com.androiduse.protocol.ImeActionRequest>(raw)
+                    }
+                    call.respond(controller.performImeAction(request))
                 }
             }
         }

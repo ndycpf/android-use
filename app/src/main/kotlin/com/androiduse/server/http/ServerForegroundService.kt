@@ -105,12 +105,17 @@ class ServerForegroundService : Service() {
         val inputDispatcher = com.androiduse.android.AccessibilityInputDispatcher(
             accessibilityRegistry = accessibilityRegistry,
         )
+        val textInputController = com.androiduse.android.AccessibilityTextInputController(
+            context = applicationContext,
+            accessibilityRegistry = accessibilityRegistry,
+        )
         val controller = DefaultDeviceController(
             accessibilityRegistry = accessibilityRegistry,
             deviceInfoProvider = deviceInfoProvider,
             screenCapturer = screenCapturer,
             uiTreeInspector = uiTreeInspector,
             inputDispatcher = inputDispatcher,
+            textInputController = textInputController,
             serverVersion = versionName,
         )
 

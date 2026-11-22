@@ -53,6 +53,7 @@ class DefaultDeviceControllerTest {
                 }
             },
             inputDispatcher = RecordingInputDispatcher(),
+            textInputController = RecordingTextInputController(),
             serverVersion = "0.1.0",
             clockMs = { 99L },
         )
@@ -88,8 +89,9 @@ class DefaultDeviceControllerTest {
     }
 
     @Test
-    fun `tap, longPress, swipe, and pressKey resolve coordinates and dispatch actions`() = runTest {
+    fun `tap, longPress, swipe, pressKey, and text actions delegate cleanly`() = runTest {
         val dispatcher = RecordingInputDispatcher()
+        val textController = RecordingTextInputController()
         val controller = DefaultDeviceController(
             accessibilityRegistry = AccessibilityServiceRegistry(),
             deviceInfoProvider = object : DeviceInfoProvider {
@@ -102,6 +104,7 @@ class DefaultDeviceControllerTest {
                 override suspend fun inspect(options: UiTreeOptions): UiTreeResponse = sampleTree()
             },
             inputDispatcher = dispatcher,
+            textInputController = textController,
             serverVersion = "0.1.0",
             clockMs = { 500L },
         )
@@ -136,6 +139,21 @@ class DefaultDeviceControllerTest {
         val keyResp = controller.pressKey(KeyRequest(GlobalKey.BACK))
         assertEquals("key", keyResp.action)
 
+        val typeResp = controller.typeText(
+            com.androiduse.protocol.TypeTextRequest(text = "hello", clearFirst = true, submit = true),
+        )
+        assertTrue(typeResp.ok)
+        assertEquals("type", typeResp.action)
+        assertEquals("set_text", typeResp.method)
+        assertTrue(typeResp.submitted)
+
+        val clearResp = controller.clearText()
+        assertEquals("clear", clearResp.action)
+
+        val imeResp = controller.performImeAction(com.androiduse.protocol.ImeActionRequest("enter"))
+        assertEquals("ime", imeResp.action)
+        assertTrue(imeResp.submitted)
+
         assertEquals(
             listOf(
                 "tap:(540,1200):60",
@@ -144,6 +162,10 @@ class DefaultDeviceControllerTest {
                 "key:BACK",
             ),
             dispatcher.events,
+        )
+        assertEquals(
+            listOf("type:hello:clear=true:submit=true", "clear", "ime:enter"),
+            textController.events,
         )
 
         try {
@@ -168,6 +190,7 @@ class DefaultDeviceControllerTest {
                 override suspend fun inspect(options: UiTreeOptions): UiTreeResponse = sampleTree()
             },
             inputDispatcher = RecordingInputDispatcher(),
+            textInputController = RecordingTextInputController(),
             serverVersion = "0.1.0",
         )
         val events = mutableListOf<String>()
@@ -247,6 +270,25 @@ class DefaultDeviceControllerTest {
 
         override suspend fun pressGlobalKey(key: GlobalKey) {
             events += "key:$key"
+        }
+    }
+
+    private class RecordingTextInputController : TextInputController {
+        val events = mutableListOf<String>()
+
+        override suspend fun typeText(request: com.androiduse.protocol.TypeTextRequest): TextInputResult {
+            events += "type:${request.text}:clear=${request.clearFirst}:submit=${request.submit}"
+            return TextInputResult(method = "set_text", submitted = request.submit)
+        }
+
+        override suspend fun clearText(): TextInputResult {
+            events += "clear"
+            return TextInputResult(method = "set_text", submitted = false)
+        }
+
+        override suspend fun performImeAction(request: com.androiduse.protocol.ImeActionRequest): TextInputResult {
+            events += "ime:${request.action}"
+            return TextInputResult(method = "ime_enter", submitted = true)
         }
     }
 }

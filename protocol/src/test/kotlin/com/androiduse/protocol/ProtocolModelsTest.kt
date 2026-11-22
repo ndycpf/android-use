@@ -165,6 +165,21 @@ class ProtocolModelsTest {
             timestampMs = 5_000L,
         )
         assertEquals(resp, json.decodeFromString<ActionResponse>(json.encodeToString(resp)))
+
+        val typeReq = json.decodeFromString<TypeTextRequest>("""{"text":"hello"}""")
+        assertEquals("hello", typeReq.text)
+        assertFalse(typeReq.clearFirst)
+        assertFalse(typeReq.submit)
+        assertTrue(typeReq.useClipboardFallback)
+
+        val textResp = TextActionResponse(
+            ok = true,
+            action = "type",
+            method = "set_text",
+            submitted = true,
+            timestampMs = 6_000L,
+        )
+        assertEquals(textResp, json.decodeFromString<TextActionResponse>(json.encodeToString(textResp)))
     }
 
     @Test
