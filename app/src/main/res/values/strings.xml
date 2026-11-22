@@ -35,7 +35,11 @@
     <string name="copy_command">Copy curl Command</string>
     <string name="copied_toast">Copied to clipboard</string>
 
-    <string name="server_notification_channel_name">android-use Local Server</string>
+    <string name="server_notification_channel_name">android-use Server Status</string>
     <string name="server_notification_title">android-use server running</string>
     <string name="server_notification_text">Listening on %1$s</string>
+    <string name="server_notification_session_title">android-use · Session active</string>
+    <string name="server_notification_session_text">%1$s · %2$s</string>
+    <string name="notification_permission_hint">Notification permission is off. Enable it to show the persistent server status and Stop button in the notification shade.</string>
+    <string name="enable_notifications">Enable Notifications</string>
 </resources>

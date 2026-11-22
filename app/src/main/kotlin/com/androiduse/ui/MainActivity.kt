@@ -1,9 +1,11 @@
 package com.androiduse.ui
 
+import android.Manifest
 import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.provider.Settings
 import android.view.View
@@ -46,6 +48,8 @@ class MainActivity : Activity() {
     private lateinit var bindModeTailscale: RadioButton
     private lateinit var bindModeAll: RadioButton
     private lateinit var toggleServerButton: Button
+    private lateinit var notificationPermissionContainer: View
+    private lateinit var enableNotificationsButton: Button
     private lateinit var sessionStatusValueText: TextView
     private lateinit var endSessionButton: Button
     private lateinit var authTokenContainer: View
@@ -58,6 +62,8 @@ class MainActivity : Activity() {
     private var currentAuthToken: String = ""
     private var detectedTailscaleIp: String? = null
     private var detectedLanIp: String? = null
+    private var pendingStartAfterPermission: Boolean = false
+    private var askedNotificationPermission: Boolean = false
     private var uiScope: CoroutineScope? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -84,6 +90,8 @@ class MainActivity : Activity() {
         bindModeTailscale = findViewById(R.id.bindModeTailscale)
         bindModeAll = findViewById(R.id.bindModeAll)
         toggleServerButton = findViewById(R.id.toggleServerButton)
+        notificationPermissionContainer = findViewById(R.id.notificationPermissionContainer)
+        enableNotificationsButton = findViewById(R.id.enableNotificationsButton)
         sessionStatusValueText = findViewById(R.id.sessionStatusValueText)
         endSessionButton = findViewById(R.id.endSessionButton)
         authTokenContainer = findViewById(R.id.authTokenContainer)
@@ -119,6 +127,20 @@ class MainActivity : Activity() {
             Toast.makeText(this, R.string.copied_toast, Toast.LENGTH_SHORT).show()
         }
 
+        enableNotificationsButton.setOnClickListener {
+            if (!askedNotificationPermission ||
+                shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)
+            ) {
+                askedNotificationPermission = true
+                requestPermissions(
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    REQUEST_POST_NOTIFICATIONS,
+                )
+            } else {
+                openAppNotificationSettings()
+            }
+        }
+
         endSessionButton.setOnClickListener {
             sessionManager.endSession()
             if (serverStateRegistry.state.value.running) {
@@ -129,12 +151,20 @@ class MainActivity : Activity() {
         toggleServerButton.setOnClickListener {
             if (serverStateRegistry.state.value.running) {
                 startService(ServerForegroundService.stopIntent(this))
+            } else if (!hasNotificationPermission() && !askedNotificationPermission) {
+                pendingStartAfterPermission = true
+                askedNotificationPermission = true
+                requestPermissions(
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    REQUEST_POST_NOTIFICATIONS,
+                )
             } else {
                 startServerForSelectedMode()
             }
         }
 
         refreshDetectedIps()
+        renderNotificationPermissionBanner()
         renderAccessibilityStatus(registry.isConnected.value)
         renderServerState(serverStateRegistry.state.value)
         renderSessionState(sessionManager.state.value)
@@ -164,13 +194,49 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         refreshDetectedIps()
+        renderNotificationPermissionBanner()
         refreshConnectionDetails(serverStateRegistry.state.value)
+        if (hasNotificationPermission() && serverStateRegistry.state.value.running) {
+            startService(ServerForegroundService.restoreNotificationIntent(this))
+        }
     }
 
     override fun onStop() {
         uiScope?.cancel()
         uiScope = null
         super.onStop()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_POST_NOTIFICATIONS) {
+            renderNotificationPermissionBanner()
+            if (pendingStartAfterPermission) {
+                pendingStartAfterPermission = false
+                startServerForSelectedMode()
+            } else if (hasNotificationPermission() && serverStateRegistry.state.value.running) {
+                startService(ServerForegroundService.restoreNotificationIntent(this))
+            }
+        }
+    }
+
+    private fun hasNotificationPermission(): Boolean =
+        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+    private fun renderNotificationPermissionBanner() {
+        notificationPermissionContainer.visibility =
+            if (hasNotificationPermission()) View.GONE else View.VISIBLE
+    }
+
+    private fun openAppNotificationSettings() {
+        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+            putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+        }
+        startActivity(intent)
     }
 
     private fun startServerForSelectedMode() {
@@ -311,5 +377,9 @@ class MainActivity : Activity() {
             curl -X POST http://$host:$port/v1/session/end
             """.trimIndent()
         }
+    }
+
+    companion object {
+        private const val REQUEST_POST_NOTIFICATIONS: Int = 2001
     }
 }

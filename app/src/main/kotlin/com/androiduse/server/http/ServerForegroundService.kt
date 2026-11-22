@@ -21,6 +21,7 @@ import com.androiduse.android.AndroidDeviceInfoProvider
 import com.androiduse.android.AndroidDevicePowerController
 import com.androiduse.android.ServerPreferences
 import com.androiduse.core.AccessibilityServiceRegistry
+import com.androiduse.core.ActiveSession
 import com.androiduse.core.DefaultDeviceController
 import com.androiduse.core.NetworkAddressHelper
 import com.androiduse.core.ResilientScreenCapturer
@@ -39,7 +40,7 @@ import kotlinx.coroutines.launch
 
 /**
  * Foreground service hosting the embedded local HTTP server, session idle timeout watcher,
- * and persistent session overlay lifecycle.
+ * persistent status/stop notification, and persistent session overlay lifecycle.
  */
 class ServerForegroundService : Service() {
 
@@ -51,6 +52,8 @@ class ServerForegroundService : Service() {
     private var overlayController: AccessibilityOverlayController? = null
     private var serviceScope: CoroutineScope? = null
     private var idleWatcherJob: Job? = null
+    private var activeHost: String = ServerState.DEFAULT_HOST
+    private var activePort: Int = ServerState.DEFAULT_PORT
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -64,6 +67,14 @@ class ServerForegroundService : Service() {
             ACTION_END_SESSION -> {
                 sessionManager.endSession()
                 overlayController?.setSessionActive(active = false)
+                refreshNotification(session = null)
+                return START_STICKY
+            }
+
+            ACTION_RESTORE_NOTIFICATION -> {
+                if (httpServer != null) {
+                    refreshNotification(session = sessionManager.currentSession())
+                }
                 return START_STICKY
             }
 
@@ -87,10 +98,20 @@ class ServerForegroundService : Service() {
     }
 
     private fun startServer(host: String, port: Int, explicitToken: String?) {
-        if (httpServer != null) return
+        if (httpServer != null) {
+            refreshNotification(session = sessionManager.currentSession())
+            return
+        }
+
+        activeHost = host
+        activePort = port
 
         ensureNotificationChannel()
-        val notification = buildNotification(host, port)
+        val notification = buildNotification(
+            host = host,
+            port = port,
+            session = sessionManager.currentSession(),
+        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 NOTIFICATION_ID,
@@ -149,6 +170,7 @@ class ServerForegroundService : Service() {
                 label = activeSession?.label,
                 keepAwake = activeSession?.keepAwake ?: false,
             )
+            refreshNotification(session = activeSession)
         }
 
         val controller = DefaultDeviceController(
@@ -219,71 +241,121 @@ class ServerForegroundService : Service() {
         stopSelf()
     }
 
-    private fun ensureNotificationChannel() {
-        val manager = getSystemService(NotificationManager::class.java)
+    private fun refreshNotification(session: ActiveSession?) {
+        if (httpServer == null) return
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        manager.notify(
+            NOTIFICATION_ID,
+            buildNotification(host = activeHost, port = activePort, session = session),
+        )
+    }
+
+    internal fun ensureNotificationChannel() {
+        val manager = getSystemService(NotificationManager::class.java) ?: return
         val channel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.server_notification_channel_name),
-            NotificationManager.IMPORTANCE_LOW,
-        )
+            NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply {
+            setSound(null, null)
+            enableVibration(false)
+            setShowBadge(false)
+        }
         manager.createNotificationChannel(channel)
     }
 
-    private fun buildNotification(host: String, port: Int): Notification {
+    internal fun buildNotification(
+        host: String,
+        port: Int,
+        session: ActiveSession? = null,
+    ): Notification {
+        val pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+
         val openAppIntent = PendingIntent.getActivity(
             this,
             0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE,
-        )
-
-        val endSessionIntent = PendingIntent.getService(
-            this,
-            2,
-            endSessionIntent(this),
-            PendingIntent.FLAG_IMMUTABLE,
+            Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            },
+            pendingFlags,
         )
 
         val stopIntent = PendingIntent.getService(
             this,
             1,
             stopIntent(this),
-            PendingIntent.FLAG_IMMUTABLE,
+            pendingFlags,
         )
 
-        return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.server_notification_title))
-            .setContentText(getString(R.string.server_notification_text, "$host:$port"))
+        val restoreIntent = PendingIntent.getService(
+            this,
+            3,
+            restoreNotificationIntent(this),
+            pendingFlags,
+        )
+
+        val endpoint = "$host:$port"
+        val title = if (session != null) {
+            getString(R.string.server_notification_session_title)
+        } else {
+            getString(R.string.server_notification_title)
+        }
+        val contentText = if (session != null) {
+            val label = session.label ?: getString(R.string.session_default_label)
+            getString(R.string.server_notification_session_text, label, endpoint)
+        } else {
+            getString(R.string.server_notification_text, endpoint)
+        }
+
+        val builder = Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(contentText)
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setCategory(Notification.CATEGORY_SERVICE)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
             .setContentIntent(openAppIntent)
-            .addAction(
+            .setDeleteIntent(restoreIntent)
+
+        if (session != null) {
+            val endSessionIntent = PendingIntent.getService(
+                this,
+                2,
+                endSessionIntent(this),
+                pendingFlags,
+            )
+            builder.addAction(
                 Notification.Action.Builder(
                     null,
                     getString(R.string.end_session),
                     endSessionIntent,
                 ).build(),
             )
-            .addAction(
-                Notification.Action.Builder(
-                    null,
-                    getString(R.string.stop_server),
-                    stopIntent,
-                ).build(),
-            )
-            .build()
+        }
+
+        builder.addAction(
+            Notification.Action.Builder(
+                null,
+                getString(R.string.stop_server),
+                stopIntent,
+            ).build(),
+        )
+
+        return builder.build()
     }
 
     companion object {
         const val ACTION_START: String = "com.androiduse.action.START_SERVER"
         const val ACTION_STOP: String = "com.androiduse.action.STOP_SERVER"
         const val ACTION_END_SESSION: String = "com.androiduse.action.END_SESSION"
+        const val ACTION_RESTORE_NOTIFICATION: String = "com.androiduse.action.RESTORE_NOTIFICATION"
         const val EXTRA_HOST: String = "host"
         const val EXTRA_PORT: String = "port"
         const val EXTRA_AUTH_TOKEN: String = "auth_token"
 
-        private const val CHANNEL_ID: String = "android_use_server"
-        private const val NOTIFICATION_ID: Int = 1001
+        internal const val CHANNEL_ID: String = "android_use_server_status"
+        internal const val NOTIFICATION_ID: Int = 1001
         private const val DEFAULT_VERSION: String = "0.1.0"
         private const val IDLE_CHECK_INTERVAL_MS: Long = 5_000L
 
@@ -309,6 +381,11 @@ class ServerForegroundService : Service() {
         fun endSessionIntent(context: Context): Intent =
             Intent(context, ServerForegroundService::class.java).apply {
                 action = ACTION_END_SESSION
+            }
+
+        fun restoreNotificationIntent(context: Context): Intent =
+            Intent(context, ServerForegroundService::class.java).apply {
+                action = ACTION_RESTORE_NOTIFICATION
             }
     }
 }
