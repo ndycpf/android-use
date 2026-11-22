@@ -8,6 +8,7 @@ data class ServerState(
     val running: Boolean = false,
     val host: String = DEFAULT_HOST,
     val port: Int = DEFAULT_PORT,
+    val authRequired: Boolean = false,
     val lastError: String? = null,
 ) {
     val endpoint: String
@@ -23,11 +24,12 @@ class ServerStateRegistry {
     private val _state = MutableStateFlow(ServerState())
     val state: StateFlow<ServerState> = _state.asStateFlow()
 
-    fun markRunning(host: String, port: Int) {
+    fun markRunning(host: String, port: Int, authRequired: Boolean = false) {
         _state.value = ServerState(
             running = true,
             host = host,
             port = port,
+            authRequired = authRequired,
             lastError = null,
         )
     }

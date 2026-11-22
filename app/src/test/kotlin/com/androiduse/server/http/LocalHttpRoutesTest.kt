@@ -267,6 +267,43 @@ class LocalHttpRoutesTest {
         assertEquals("boom", body.error.message)
     }
 
+    @Test
+    fun `Bearer auth rejects missing or invalid token with 401 and allows valid token`() = testApplication {
+        application {
+            configureAndroidUseHttp(
+                controller = FakeDeviceController(),
+                authToken = "secret-token-123",
+            )
+        }
+
+        val missing = client.get("/v1/health")
+        assertEquals(HttpStatusCode.Unauthorized, missing.status)
+        assertEquals(
+            ErrorCode.UNAUTHORIZED,
+            json.decodeFromString<ErrorResponse>(missing.bodyAsText()).error.code,
+        )
+
+        val wrong = client.get("/v1/health") {
+            headers.append("Authorization", "Bearer wrong-token")
+        }
+        assertEquals(HttpStatusCode.Unauthorized, wrong.status)
+
+        val valid = client.get("/v1/health") {
+            headers.append("Authorization", "Bearer secret-token-123")
+        }
+        assertEquals(HttpStatusCode.OK, valid.status)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `LocalHttpServer refuses non-loopback bind without Bearer authToken`() {
+        LocalHttpServer(
+            controller = FakeDeviceController(),
+            host = "100.64.1.2",
+            port = 8765,
+            authToken = null,
+        )
+    }
+
     private class FakeDeviceController(
         private val health: HealthResponse = HealthResponse("ok", false, "0.1.0"),
         private val deviceInfo: DeviceInfoResponse = DeviceInfoResponse(

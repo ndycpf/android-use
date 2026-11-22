@@ -12,10 +12,22 @@
     <string name="server_heading">Local HTTP Server</string>
     <string name="server_status_stopped">Stopped</string>
     <string name="server_status_running">Running (%1$s)</string>
+    <string name="server_status_running_auth">Running (%1$s, Bearer auth)</string>
     <string name="server_status_error">Stopped (%1$s)</string>
-    <string name="start_server">Start Local Server</string>
-    <string name="stop_server">Stop Local Server</string>
-    <string name="adb_forward_hint">Connect from host:\nadb forward tcp:8765 tcp:8765\ncurl http://127.0.0.1:8765/v1/health\ncurl "http://127.0.0.1:8765/v1/screen/screenshot?encoding=binary" -o screen.jpg</string>
+    <string name="start_server">Start Server</string>
+    <string name="stop_server">Stop Server</string>
+
+    <string name="bind_mode_heading">Network Interface</string>
+    <string name="bind_mode_loopback">Loopback only (127.0.0.1 / adb forward)</string>
+    <string name="bind_mode_tailscale">Tailscale (%1$s)</string>
+    <string name="bind_mode_tailscale_unavailable">Tailscale (not detected)</string>
+    <string name="bind_mode_all">All interfaces (0.0.0.0 / Tailscale &amp; LAN)</string>
+    <string name="tailscale_not_found_error">Tailscale IPv4 (100.64.0.0/10) not detected. Connect Tailscale first or select All interfaces.</string>
+
+    <string name="auth_token_heading">Bearer Token (required outside loopback)</string>
+    <string name="rotate_token">Rotate Token</string>
+    <string name="copy_command">Copy curl Command</string>
+    <string name="copied_toast">Copied to clipboard</string>
 
     <string name="server_notification_channel_name">android-use Local Server</string>
     <string name="server_notification_title">android-use server running</string>

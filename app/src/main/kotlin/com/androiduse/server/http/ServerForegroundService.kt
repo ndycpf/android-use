@@ -13,8 +13,10 @@ import android.os.IBinder
 import com.androiduse.R
 import com.androiduse.android.AccessibilityScreenCapturer
 import com.androiduse.android.AndroidDeviceInfoProvider
+import com.androiduse.android.ServerPreferences
 import com.androiduse.core.AccessibilityServiceRegistry
 import com.androiduse.core.DefaultDeviceController
+import com.androiduse.core.NetworkAddressHelper
 import com.androiduse.core.ResilientScreenCapturer
 import com.androiduse.core.ServerState
 import com.androiduse.core.ServerStateRegistry
@@ -44,7 +46,8 @@ class ServerForegroundService : Service() {
                 val host = intent?.getStringExtra(EXTRA_HOST) ?: ServerState.DEFAULT_HOST
                 val port = intent?.getIntExtra(EXTRA_PORT, ServerState.DEFAULT_PORT)
                     ?: ServerState.DEFAULT_PORT
-                startServer(host, port)
+                val explicitToken = intent?.getStringExtra(EXTRA_AUTH_TOKEN)
+                startServer(host = host, port = port, explicitToken = explicitToken)
                 return START_STICKY
             }
         }
@@ -59,7 +62,7 @@ class ServerForegroundService : Service() {
         super.onDestroy()
     }
 
-    private fun startServer(host: String, port: Int) {
+    private fun startServer(host: String, port: Int, explicitToken: String?) {
         if (httpServer != null) return
 
         ensureNotificationChannel()
@@ -72,6 +75,13 @@ class ServerForegroundService : Service() {
             )
         } else {
             startForeground(NOTIFICATION_ID, notification)
+        }
+
+        val authToken = if (NetworkAddressHelper.isLoopbackHost(host)) {
+            null
+        } else {
+            explicitToken?.takeIf { it.isNotBlank() }
+                ?: ServerPreferences(applicationContext).getOrCreateAuthToken()
         }
 
         val versionName = runCatching {
@@ -96,11 +106,20 @@ class ServerForegroundService : Service() {
             serverVersion = versionName,
         )
 
-        val server = LocalHttpServer(controller = controller, host = host, port = port)
+        val server = LocalHttpServer(
+            controller = controller,
+            host = host,
+            port = port,
+            authToken = authToken,
+        )
         try {
             server.start()
             httpServer = server
-            serverStateRegistry.markRunning(host, port)
+            serverStateRegistry.markRunning(
+                host = host,
+                port = port,
+                authRequired = authToken != null,
+            )
         } catch (e: Throwable) {
             server.stop()
             serverStateRegistry.markStopped(e.message ?: "Failed to start local HTTP server.")
@@ -163,6 +182,7 @@ class ServerForegroundService : Service() {
         const val ACTION_STOP: String = "com.androiduse.action.STOP_SERVER"
         const val EXTRA_HOST: String = "host"
         const val EXTRA_PORT: String = "port"
+        const val EXTRA_AUTH_TOKEN: String = "auth_token"
 
         private const val CHANNEL_ID: String = "android_use_server"
         private const val NOTIFICATION_ID: Int = 1001
@@ -172,10 +192,14 @@ class ServerForegroundService : Service() {
             context: Context,
             host: String = ServerState.DEFAULT_HOST,
             port: Int = ServerState.DEFAULT_PORT,
+            authToken: String? = null,
         ): Intent = Intent(context, ServerForegroundService::class.java).apply {
             action = ACTION_START
             putExtra(EXTRA_HOST, host)
             putExtra(EXTRA_PORT, port)
+            if (authToken != null) {
+                putExtra(EXTRA_AUTH_TOKEN, authToken)
+            }
         }
 
         fun stopIntent(context: Context): Intent =

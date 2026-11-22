@@ -9,22 +9,29 @@ import com.androiduse.protocol.ErrorResponse
 import com.androiduse.protocol.ImageFormat
 import com.androiduse.protocol.ProtocolJson
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.Parameters
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
+import io.ktor.server.application.createApplicationPlugin
 import io.ktor.server.application.install
 import io.ktor.server.plugins.BadRequestException
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.statuspages.StatusPages
+import io.ktor.server.request.header
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
 import io.ktor.server.routing.get
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
+import java.security.MessageDigest
 
-fun Application.configureAndroidUseHttp(controller: DeviceController) {
+fun Application.configureAndroidUseHttp(
+    controller: DeviceController,
+    authToken: String? = null,
+) {
     install(ContentNegotiation) {
         json(ProtocolJson.instance)
     }
@@ -83,6 +90,24 @@ fun Application.configureAndroidUseHttp(controller: DeviceController) {
         }
     }
 
+    if (!authToken.isNullOrEmpty()) {
+        val expectedBytes = authToken.toByteArray(Charsets.UTF_8)
+        val bearerAuthPlugin = createApplicationPlugin("AndroidUseBearerAuth") {
+            onCall { call ->
+                val header = call.request.header(HttpHeaders.Authorization)
+                val provided = header
+                    ?.takeIf { it.startsWith(BEARER_PREFIX, ignoreCase = true) }
+                    ?.substring(BEARER_PREFIX.length)
+                    ?.trim()
+                val providedBytes = provided?.toByteArray(Charsets.UTF_8)
+                if (providedBytes == null || !MessageDigest.isEqual(expectedBytes, providedBytes)) {
+                    throw AndroidUseException.unauthorized()
+                }
+            }
+        }
+        install(bearerAuthPlugin)
+    }
+
     routing {
         route("/v1") {
             get("/health") {
@@ -120,6 +145,8 @@ fun Application.configureAndroidUseHttp(controller: DeviceController) {
         }
     }
 }
+
+private const val BEARER_PREFIX: String = "Bearer "
 
 private enum class ScreenshotEncoding {
     BASE64,

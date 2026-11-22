@@ -18,6 +18,7 @@ object ProtocolJson {
 @Serializable
 enum class ErrorCode {
     ACCESSIBILITY_NOT_CONNECTED,
+    UNAUTHORIZED,
     INVALID_REQUEST,
     SCREENSHOT_FAILED,
     SCREENSHOT_RATE_LIMITED,

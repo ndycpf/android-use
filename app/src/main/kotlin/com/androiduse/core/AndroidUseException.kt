@@ -28,6 +28,15 @@ class AndroidUseException(
             retryable = false,
         )
 
+        fun unauthorized(
+            message: String = "Missing or invalid Bearer token.",
+        ): AndroidUseException = AndroidUseException(
+            code = ErrorCode.UNAUTHORIZED,
+            message = message,
+            httpStatus = 401,
+            retryable = false,
+        )
+
         fun screenshotRateLimited(
             message: String = "Screen capture rate limit exceeded; retry shortly.",
         ): AndroidUseException = AndroidUseException(
