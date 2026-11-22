@@ -118,34 +118,45 @@ scripts/android-use.sh wait-sleep [durationMs]
 scripts/android-use.sh wait-text <text> [timeoutMs]
 scripts/android-use.sh wait-gone <text> [timeoutMs]
 
-# Optional fast subtask runner (requires TYPESAFE_API_KEY or OPENROUTER_API_KEY)
-scripts/android-use.sh run-jev "<subtask goal>" [--max-steps 12] [--text "<input>"] [--submit] [--no-vision]
+# Optional Jev helpers (requires TYPESAFE_API_KEY or OPENROUTER_API_KEY)
+scripts/android-use.sh tap-jev "<element to tap on current screen>" [--text "<input>"] [--submit] [--no-vision]
+scripts/android-use.sh run-jev "<1-screen micro-goal>" [--max-steps 2] [--text "<input>"] [--submit] [--no-vision]
 ```
 
-## Optional Fast Subtask Runner (Jev)
+## Optional Jev Helpers (`tap-jev` / `run-jev`)
 
-If `TYPESAFE_API_KEY` (direct TypeSafe `/v1/systemone`, default `jev-latest`) or `OPENROUTER_API_KEY` (OpenRouter `/api/alpha/decisions`, default `typesafe/jev-1.14`) is set in the environment, you can delegate repetitive UI navigation to the fast System-1 runner instead of taking one LLM turn per tap:
+If `TYPESAFE_API_KEY` (direct TypeSafe `/v1/systemone`, default `jev-latest`) or `OPENROUTER_API_KEY` (OpenRouter `/api/alpha/decisions`, default `typesafe/jev-1.14`) is set in the environment, you can offload fast element selection (~150–300ms) to Jev.
+
+### Division of Responsibility (Preventing Infinite Loops)
+
+**Do NOT hand Jev long multi-step loops.** Because Jev is a stateless System-1 classifier, letting it control scrolling, backtracking, and multi-screen navigation often causes oscillation or infinite loops.
+
+- **Main agent (you) owns the overall flow**: launching apps, deciding which screen to go to, scrolling when an item isn't visible, running `tap-text` when the exact label is already known, and verifying completion.
+- **Jev owns 1-shot semantic picking on the current screen (`tap-jev`, recommended)**: pick and tap **one** matching element on the current screen (e.g. *"the first non-ad restaurant card"*, *"the share icon"*, *"the search bar"*) and immediately return `after_screen_marks` so you stay in control with zero loop risk.
+- Only use `run-jev` for strictly **1–2 step** micro-transitions (`--max-steps 2`) on a single target screen.
 
 ```bash
-scripts/android-use.sh run-jev "Currently on Google Maps home. Search for udon. Done when the search results list is visible. Do not tap 'Ask Maps'." --text "udon" --submit --max-steps 5
-scripts/android-use.sh run-jev "Currently on Google Maps search results for udon. Open the first restaurant detail page. Done when the place name and 'Directions' button are visible." --max-steps 5
+# Recommended: 1-shot loop-proof pick & tap (returns after_screen_marks)
+scripts/android-use.sh tap-jev "Tap the search bar (not 'Ask Maps')" --text "udon" --submit
+scripts/android-use.sh tap-jev "Tap the first udon restaurant result (not 'Ask Maps', not sponsored ad)"
+
+# Optional 1-2 step micro-loop (keep max-steps small)
+scripts/android-use.sh run-jev "Currently on Google Maps search results for udon. Open the first restaurant detail page. Done when the place name and 'Directions' button are visible. Do not tap 'Ask Maps'." --max-steps 2
 ```
 
-- Runs text-first using live `marks` (~150–300ms per decision) and falls back to `screenshot?annotate=true` only when unlabeled icons or low confidence require vision (disable with `--no-vision`).
+### Goal Prompting Tips for Jev
+
+1. **Prefer `tap-jev` (1 action)**: Ask Jev only *"pick and tap the 1 element on this screen matching X"*, and handle scrolling / next-step planning yourself.
+2. **1 goal = 1 target screen** (if using `run-jev`): Never bundle multiple stages (*"search and open 1st item"*); split into one screen transition per call (`--max-steps 2`).
+3. **State explicit negative constraints**: Call out distractors to ignore (*"Do NOT tap 'Ask Maps'"*, *"Do NOT tap sponsored ads"*).
+4. **State the current screen & concrete completion markers**: Prefix with *"Currently on …"* and (for `run-jev`) specify visible markers like *"Done when 'Directions' button is visible"*.
+
+- Runs text-first using live `marks` and falls back to `screenshot?annotate=true` only when unlabeled icons or low confidence require vision (disable with `--no-vision`).
 - Optional overrides: `JEV_PROVIDER=typesafe|openrouter`, `JEV_MODEL=<model-id>`, `JEV_ENDPOINT=<custom-url>`.
 - Exit codes & handoff:
-  - `0` (`status: "done"`): subtask completed.
-  - `10` (`status: "escalate"` or `"max_steps"`): runner paused cleanly (e.g. needs free-form text, sensitive confirmation, low confidence, or Canvas screen) and printed `steps` + `last_screen_marks` so you can immediately resume with standard commands.
+  - `0` (`status: "tapped"` / `"done"`): action succeeded; inspect `after_screen_marks` / `last_screen_marks`.
+  - `10` (`status: "not_found"` / `"escalate"` / `"max_steps"`): element absent, low confidence, or cycle detected — scroll or handle directly using returned `screen_marks`.
   - `2` (`code: "JEV_NOT_CONFIGURED"`): no Jev API key is set — continue normally with `marks` / `tree` / `tap-mark`.
-
-### Goal Prompting Tips for `run-jev`
-
-Jev is a fast System-1 decision model (not a multi-step planner). Bundling multiple stages into one goal (e.g. *"Search for udon and open the first result"*) often causes premature `done` on an intermediate screen. Structure each `run-jev` goal using these four rules:
-
-1. **1 goal = 1 target screen**: Split multi-stage tasks so each call ends on a single unambiguous destination screen (first *"Show search results for 'udon'"*, then *"Open the first restaurant's detail page"*).
-2. **State concrete on-screen completion criteria**: Specify visible UI markers that prove completion (e.g. *"Done when the place name and 'Directions' button are visible"* or *"Done when Wi-Fi shows (checked)"*) to sharpen `done` confidence.
-3. **Include explicit negative constraints**: Call out tempting distractors or wrong buttons to avoid (e.g. *"Do NOT tap 'Ask Maps'"* or *"Do NOT tap sponsored ads"*).
-4. **State the current starting screen**: Prefix the goal with where the phone is right now (e.g. *"Currently on Google Maps search results screen"*) so Jev immediately orients on step 1.
 
 ## Error Recovery
 

@@ -90,7 +90,8 @@ Commands:
   wait-sleep [durationMs]                        Sleep wait
   wait-text <text> [timeoutMs]                   Wait until text appears
   wait-gone <text> [timeoutMs]                   Wait until text disappears
-  run-jev <goal> [flags...]                      Optional fast UI loop via TypeSafe Jev (needs TYPESAFE_API_KEY or OPENROUTER_API_KEY)
+  tap-jev <description> [flags...]               Optional 1-shot Jev tap (recommended, loop-proof; needs Jev key)
+  run-jev <goal> [--max-steps 2] [flags...]      Optional 1-3 step Jev micro-loop (needs Jev key)
 EOF
 }
 
@@ -378,6 +379,11 @@ case "$cmd" in
       payload="{\"text\":\"$(json_escape "$text")\",\"gone\":true,\"timeoutMs\":${timeout}}"
     fi
     request POST "/v1/wait" "$payload"
+    ;;
+
+  tap-jev)
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    exec python3 "${script_dir}/jev-runner.py" --once "$@"
     ;;
 
   run-jev)

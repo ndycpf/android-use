@@ -439,7 +439,8 @@ def run_jev_loop(
     total_cost_usd = 0.0
     resolved_model = jev.config.model
     typed_already = False
-    last_sig: Optional[Tuple[str, str]] = None
+    visited_actions: set[Tuple[str, str]] = set()
+    unchanged_streak = 0
     final_status = "max_steps"
     final_reason = f"Reached max_steps={max_steps} without completing goal."
     last_marks_summary: List[str] = []
@@ -467,7 +468,16 @@ def run_jev_loop(
             if recent_actions:
                 prev_fp = recent_actions[-1].pop("_fingerprint", None)
                 if prev_fp is not None:
-                    recent_actions[-1]["screen_changed"] = prev_fp != fingerprint
+                    changed = prev_fp != fingerprint
+                    recent_actions[-1]["screen_changed"] = changed
+                    if not changed and recent_actions[-1].get("operation") != "wait":
+                        unchanged_streak += 1
+                    else:
+                        unchanged_streak = 0
+                    if unchanged_streak >= 2:
+                        final_status = "escalate"
+                        final_reason = "no_screen_progress"
+                        break
 
             can_type_now = bool(text_to_type) and not typed_already
             state: Dict[str, Any] = {
@@ -527,17 +537,11 @@ def run_jev_loop(
                         marks = shot_marks
                         last_marks_summary = [format_mark_label(m) for m in marks[:40]]
                         state["screen_marks"] = [format_mark_label(m) for m in marks[:MAX_CHOICE_MARKS]]
-                        questions_v = build_decision_questions(
-                            marks=marks,
-                            can_type_text=can_type_now,
-                            include_need_vision=False,
-                        )
-                    else:
-                        questions_v = build_decision_questions(
-                            marks=marks,
-                            can_type_text=can_type_now,
-                            include_need_vision=False,
-                        )
+                    questions_v = build_decision_questions(
+                        marks=marks,
+                        can_type_text=can_type_now,
+                        include_need_vision=False,
+                    )
 
                     t1 = time.monotonic()
                     resp_v = jev.evaluate(
@@ -607,12 +611,13 @@ def run_jev_loop(
                     break
 
             action_sig = f"{op}:{target_choice if op in ('tap_mark', 'type_text') else ''}"
-            if last_sig == (fingerprint, action_sig):
+            visit_key = (fingerprint, action_sig)
+            if visit_key in visited_actions:
                 steps_log.append(step_entry)
                 final_status = "escalate"
                 final_reason = f"stuck_repeat_action:{action_sig}"
                 break
-            last_sig = (fingerprint, action_sig)
+            visited_actions.add(visit_key)
 
             if dry_run:
                 step_entry["dry_run"] = True
@@ -684,22 +689,243 @@ def run_jev_loop(
     }
 
 
+def build_single_tap_questions(
+    marks: List[Dict[str, Any]],
+    include_need_vision: bool,
+) -> Dict[str, Any]:
+    capped_marks = marks[:MAX_CHOICE_MARKS]
+    target_criteria: Dict[str, str] = {
+        str(m["markId"]): format_mark_label(m) for m in capped_marks
+    }
+    target_criteria["none"] = (
+        "No visible element on the current screen matches the target description, or it violates a negative constraint."
+    )
+    questions: Dict[str, Any] = {
+        "target_mark": {
+            "type": "choice",
+            "instructions": (
+                "Select the SINGLE numbered UI element from `screen_marks` that best matches `target_description` "
+                "(strictly obeying any 'do not tap' constraints). Choose 'none' if no element matches."
+            ),
+            "criteria": target_criteria,
+        }
+    }
+    if include_need_vision:
+        questions["need_vision"] = {
+            "type": "noul",
+            "instructions": (
+                "Is a visual screenshot required to reliably identify the requested element "
+                "(for example because candidate buttons are unlabeled icons or require seeing images/colors)?"
+            ),
+            "criteria": {
+                "true": "Text labels in screen_marks are insufficient; visual inspection is needed.",
+                "false": "Text labels in screen_marks clearly identify the target element or confirm its absence.",
+            },
+        }
+    return questions
+
+
+def tap_with_jev(
+    target_description: str,
+    device: AndroidUseClient,
+    jev: JevClient,
+    text_to_type: Optional[str] = None,
+    clear_first: bool = False,
+    submit_text: bool = False,
+    vision_fallback: bool = True,
+    min_target_confidence: float = 0.45,
+    settle_ms: int = 250,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Single-shot, loop-proof element picker & tapper powered by Jev."""
+    started_at = time.monotonic()
+    started_own_session = False
+
+    session_status = device.get_session()
+    if not session_status.get("active"):
+        if dry_run:
+            raise RunnerError("SESSION_NOT_ACTIVE", "Active session required before dry-run observation.")
+        device.start_session(label=f"jev-tap:{target_description[:24]}")
+        started_own_session = True
+
+    total_input_tokens = 0
+    total_cost_usd = 0.0
+    resolved_model = jev.config.model
+
+    try:
+        info = device.get_device_info()
+        if info.get("deviceLocked"):
+            return {
+                "status": "escalate",
+                "reason": "device_locked",
+                "target_description": target_description,
+                "provider": jev.config.provider,
+                "model": resolved_model,
+            }
+
+        fg_pkg = info.get("foregroundPackage")
+        marks_resp = device.get_marks(refresh=True)
+        marks: List[Dict[str, Any]] = marks_resp.get("marks") or []
+        unlabeled = count_unlabeled_marks(marks)
+        before_summary = [format_mark_label(m) for m in marks[:40]]
+
+        if not marks:
+            return {
+                "status": "not_found",
+                "reason": "no_interactive_marks",
+                "target_description": target_description,
+                "foreground_package": fg_pkg,
+                "provider": jev.config.provider,
+                "model": resolved_model,
+                "screen_marks": [],
+            }
+
+        state: Dict[str, Any] = {
+            "target_description": target_description,
+            "foreground_package": fg_pkg,
+            "unlabeled_count": unlabeled,
+            "screen_marks": [format_mark_label(m) for m in marks[:MAX_CHOICE_MARKS]],
+        }
+        questions = build_single_tap_questions(marks=marks, include_need_vision=vision_fallback)
+
+        t0 = time.monotonic()
+        resp = jev.evaluate(state=state, questions=questions)
+        decision_ms = int((time.monotonic() - t0) * 1000)
+
+        resolved_model = str(resp.get("model") or resolved_model)
+        usage = resp.get("usage") or {}
+        total_input_tokens += int(usage.get("input_tokens") or 0)
+        total_cost_usd += float(usage.get("cost") or 0.0)
+
+        answers = resp.get("answers") or {}
+        target_choice, target_prob, target_conf = parse_choice_answer(answers, "target_mark")
+        need_vision_prob = parse_noul_answer(answers, "need_vision") if vision_fallback else 0.0
+        used_vision = False
+
+        needs_visual_retry = vision_fallback and (
+            need_vision_prob >= 0.65
+            or (unlabeled > 0 and (target_choice == "none" or target_conf < min_target_confidence))
+        )
+
+        if needs_visual_retry:
+            try:
+                shot = device.get_annotated_screenshot_base64()
+                shot_marks = shot.get("marks") or marks
+                if shot_marks:
+                    marks = shot_marks
+                    before_summary = [format_mark_label(m) for m in marks[:40]]
+                    state["screen_marks"] = [format_mark_label(m) for m in marks[:MAX_CHOICE_MARKS]]
+                questions_v = build_single_tap_questions(marks=marks, include_need_vision=False)
+                t1 = time.monotonic()
+                resp_v = jev.evaluate(
+                    state=state,
+                    questions=questions_v,
+                    image_base64=shot.get("dataBase64"),
+                    image_format="jpeg",
+                )
+                decision_ms += int((time.monotonic() - t1) * 1000)
+                usage_v = resp_v.get("usage") or {}
+                total_input_tokens += int(usage_v.get("input_tokens") or 0)
+                total_cost_usd += float(usage_v.get("cost") or 0.0)
+                target_choice, target_prob, target_conf = parse_choice_answer(
+                    resp_v.get("answers") or {},
+                    "target_mark",
+                )
+                used_vision = True
+            except RunnerError as exc:
+                return {
+                    "status": "escalate",
+                    "reason": f"vision_fallback_failed:{exc.code}",
+                    "target_description": target_description,
+                    "provider": jev.config.provider,
+                    "model": resolved_model,
+                    "decision_ms": decision_ms,
+                    "screen_marks": before_summary,
+                }
+
+        base_out: Dict[str, Any] = {
+            "target_description": target_description,
+            "foreground_package": fg_pkg,
+            "provider": jev.config.provider,
+            "model": resolved_model,
+            "selected_mark": target_choice,
+            "probability": round(target_prob, 3),
+            "confidence": round(target_conf, 3),
+            "used_vision": used_vision,
+            "decision_ms": decision_ms,
+            "usage": {
+                "input_tokens": total_input_tokens,
+                "cost_usd": round(total_cost_usd, 6),
+            },
+        }
+
+        if target_choice == "none" or target_conf < min_target_confidence:
+            base_out["status"] = "not_found" if target_choice == "none" else "escalate"
+            base_out["reason"] = (
+                "no_matching_element" if target_choice == "none" else f"low_confidence:{target_conf:.2f}"
+            )
+            base_out["screen_marks"] = before_summary
+            base_out["total_elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
+            return base_out
+
+        matched_label = next(
+            (format_mark_label(m) for m in marks if str(m.get("markId")) == target_choice),
+            f"[{target_choice}]",
+        )
+        base_out["selected_label"] = matched_label
+
+        if dry_run:
+            base_out["status"] = "dry_run"
+            base_out["total_elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
+            return base_out
+
+        mark_id = int(target_choice)
+        tap_res = device.tap_mark(mark_id)
+        base_out["resolved_point"] = tap_res.get("resolvedPoint")
+
+        if text_to_type:
+            if settle_ms > 0:
+                time.sleep(min(settle_ms, 200) / 1000.0)
+            device.type_text(text=text_to_type, clear_first=clear_first, submit=submit_text)
+            base_out["typed_text"] = text_to_type
+
+        if settle_ms > 0:
+            time.sleep(settle_ms / 1000.0)
+
+        after_marks = device.get_marks(refresh=True).get("marks") or []
+        base_out["status"] = "tapped"
+        base_out["after_screen_marks"] = [format_mark_label(m) for m in after_marks[:40]]
+        base_out["total_elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
+        return base_out
+    finally:
+        if started_own_session:
+            try:
+                device.end_session()
+            except Exception:
+                pass
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Optional fast Android UI subtask runner using TypeSafe Jev (direct or OpenRouter).",
+        description="Optional fast Android UI element picker & short subtask runner using TypeSafe Jev.",
     )
-    parser.add_argument("goal", help="Concise UI subtask goal, e.g. 'Open Wi-Fi settings and turn Wi-Fi on'")
+    parser.add_argument("goal", help="Target element description (with --once) or 1-screen subtask goal")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Single-shot mode (recommended): pick and tap ONE matching element on the current screen (loop-proof)",
+    )
     parser.add_argument("--provider", default=None, choices=["auto", "typesafe", "openrouter"], help="Jev API provider")
     parser.add_argument("--model", default=None, help="Override model ID (default: jev-latest or typesafe/jev-1.14)")
     parser.add_argument("--endpoint", default=None, help="Override Jev API endpoint URL")
-    parser.add_argument("--max-steps", type=int, default=12, help="Maximum UI actions before stopping (default: 12)")
-    parser.add_argument("--text", default=None, help="Pre-supplied text string if a step needs typing")
+    parser.add_argument("--max-steps", type=int, default=3, help="Maximum UI actions in loop mode (default: 3)")
+    parser.add_argument("--text", default=None, help="Pre-supplied text string to type after tapping target")
     parser.add_argument("--clear-first", action="store_true", help="Clear field before typing --text")
     parser.add_argument("--submit", action="store_true", help="Submit IME Enter after typing --text")
     parser.add_argument("--no-vision", action="store_true", help="Disable Set-of-Mark screenshot fallback")
     parser.add_argument("--min-confidence", type=float, default=0.50, help="Minimum operation confidence (default: 0.50)")
     parser.add_argument(
-        "--min-target-confidence", type=float, default=0.40, help="Minimum target_mark confidence (default: 0.40)"
+        "--min-target-confidence", type=float, default=0.45, help="Minimum target_mark confidence (default: 0.45)"
     )
     parser.add_argument("--settle-ms", type=int, default=250, help="Post-action UI settle pause in ms (default: 250)")
     parser.add_argument("--dry-run", action="store_true", help="Run 1 decision step without executing on device")
@@ -718,6 +944,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         android_token = os.environ.get("ANDROID_USE_TOKEN") or os.environ.get("TOKEN") or ""
         device = AndroidUseClient(base_url=android_url, token=android_token)
         jev = JevClient(config=jev_cfg)
+
+        if args.once:
+            result = tap_with_jev(
+                target_description=args.goal,
+                device=device,
+                jev=jev,
+                text_to_type=args.text,
+                clear_first=args.clear_first,
+                submit_text=args.submit,
+                vision_fallback=not args.no_vision,
+                min_target_confidence=args.min_target_confidence,
+                settle_ms=max(0, args.settle_ms),
+                dry_run=args.dry_run,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["status"] in ("tapped", "dry_run") else 10
 
         result = run_jev_loop(
             goal=args.goal,

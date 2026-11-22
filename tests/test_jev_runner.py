@@ -334,6 +334,126 @@ class TestJevRunnerLoop(unittest.TestCase):
             self.assertEqual(res["reason"], "stuck_repeat_action:tap_mark:1")
             self.assertEqual(res["step_count"], 2)
 
+    def test_oscillation_cycle_a_to_b_to_a_escalates(self):
+        state = {"screen": "A"}
+
+        def android_handler(req):
+            path = req["path"]
+            if path == "/v1/session":
+                return 200, {"active": True}
+            if path == "/v1/device/info":
+                return 200, {"foregroundPackage": "com.example.maps", "deviceLocked": False}
+            if path.startswith("/v1/screen/marks"):
+                label = "Ask Maps" if state["screen"] == "A" else "Back to list"
+                return 200, {
+                    "count": 1,
+                    "displayWidth": 1080,
+                    "displayHeight": 2400,
+                    "marks": [
+                        {"markId": 1, "nodeId": "n1", "text": label, "clickable": True, "center": {"x": 540, "y": 500}},
+                    ],
+                }
+            if path == "/v1/actions/tap-element":
+                state["screen"] = "B" if state["screen"] == "A" else "A"
+                return 200, {"ok": True, "resolvedPoint": {"x": 540, "y": 500}}
+            raise AssertionError(f"Unexpected path: {path}")
+
+        def jev_handler(req):
+            return 200, {
+                "model": "jev-1.14.0",
+                "answers": {
+                    "operation": {"type": "choice", "choice": "tap_mark", "probabilities": {"tap_mark": 0.9}, "confidence": 0.9},
+                    "target_mark": {"type": "choice", "choice": "1", "probabilities": {"1": 0.9}, "confidence": 0.9},
+                    "need_vision": {"type": "noul", "noul": 0.05},
+                },
+                "usage": {"input_tokens": 100},
+            }
+
+        with MockServer(android_handler) as android_srv, MockServer(jev_handler) as jev_srv:
+            device = jev_runner.AndroidUseClient(android_srv.url)
+            jev = jev_runner.JevClient(
+                jev_runner.JevConfig(
+                    provider="typesafe",
+                    api_key="test-key",
+                    endpoint=f"{jev_srv.url}/v1/systemone",
+                    model="jev-latest",
+                )
+            )
+            res = jev_runner.run_jev_loop(goal="Open restaurant", device=device, jev=jev, max_steps=6, settle_ms=0)
+            self.assertEqual(res["status"], "escalate")
+            self.assertEqual(res["reason"], "stuck_repeat_action:tap_mark:1")
+            # Step 1 (A->B), Step 2 (B->A), Step 3 sees (A, tap_mark:1) already visited -> escalates immediately.
+            self.assertEqual(res["step_count"], 3)
+
+    def test_single_shot_tap_with_jev_taps_once_and_returns_after_marks(self):
+        tapped = {"done": False}
+
+        def android_handler(req):
+            path = req["path"]
+            if path == "/v1/session":
+                return 200, {"active": True}
+            if path == "/v1/device/info":
+                return 200, {"foregroundPackage": "com.google.android.apps.maps", "deviceLocked": False}
+            if path.startswith("/v1/screen/marks"):
+                if not tapped["done"]:
+                    return 200, {
+                        "count": 2,
+                        "displayWidth": 1080,
+                        "displayHeight": 2400,
+                        "marks": [
+                            {"markId": 1, "nodeId": "n1", "text": "Ask Maps", "clickable": True, "center": {"x": 200, "y": 200}},
+                            {"markId": 2, "nodeId": "n2", "text": "Marugame Udon", "clickable": True, "center": {"x": 500, "y": 600}},
+                        ],
+                    }
+                return 200, {
+                    "count": 1,
+                    "displayWidth": 1080,
+                    "displayHeight": 2400,
+                    "marks": [
+                        {"markId": 1, "nodeId": "n1", "text": "Directions", "clickable": True, "center": {"x": 300, "y": 1400}},
+                    ],
+                }
+            if path == "/v1/actions/tap-element":
+                self.assertEqual(req["body"], {"markId": 2})
+                tapped["done"] = True
+                return 200, {"ok": True, "resolvedPoint": {"x": 500, "y": 600}}
+            raise AssertionError(f"Unexpected path: {path}")
+
+        def jev_handler(req):
+            # Single-shot asks only target_mark + need_vision (no operation loop).
+            self.assertNotIn("operation", req["body"]["questions"])
+            self.assertIn("target_mark", req["body"]["questions"])
+            return 200, {
+                "model": "jev-1.14.0",
+                "answers": {
+                    "target_mark": {"type": "choice", "choice": "2", "probabilities": {"2": 0.94}, "confidence": 0.91},
+                    "need_vision": {"type": "noul", "noul": 0.04},
+                },
+                "usage": {"input_tokens": 140, "cost": 0.000006},
+            }
+
+        with MockServer(android_handler) as android_srv, MockServer(jev_handler) as jev_srv:
+            device = jev_runner.AndroidUseClient(android_srv.url)
+            jev = jev_runner.JevClient(
+                jev_runner.JevConfig(
+                    provider="typesafe",
+                    api_key="test-key",
+                    endpoint=f"{jev_srv.url}/v1/systemone",
+                    model="jev-latest",
+                )
+            )
+            res = jev_runner.tap_with_jev(
+                target_description="Tap the first udon restaurant (do not tap Ask Maps)",
+                device=device,
+                jev=jev,
+                settle_ms=0,
+            )
+            self.assertEqual(res["status"], "tapped")
+            self.assertEqual(res["selected_mark"], "2")
+            self.assertEqual(res["selected_label"], "[2] Marugame Udon")
+            self.assertEqual(res["after_screen_marks"], ["[1] Directions"])
+            self.assertEqual(len(jev_srv.requests), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
