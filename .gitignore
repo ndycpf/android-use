@@ -1,0 +1,22 @@
+# Gradle & build outputs
+.gradle/
+build/
+**/build/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Local configuration
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Captures & logs
+captures/
+*.hprof
+*.log

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">android-use</string>
+    <string name="accessibility_service_label">android-use Automation</string>
+    <string name="accessibility_service_description">Provides screen capture, UI tree inspection, gesture injection, and text input for AI agents.</string>
+    <string name="status_heading">Accessibility Service</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_disconnected">Not enabled</string>
+    <string name="open_accessibility_settings">Open Accessibility Settings</string>
+    <string name="restricted_settings_hint">On Android 13+, sideloaded APKs require enabling "Allow restricted settings" in App Info before activating Accessibility Service.</string>
+</resources>
