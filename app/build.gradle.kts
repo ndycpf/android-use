@@ -18,6 +18,23 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        val ciKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
+        val ciKeystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")?.takeIf { it.isNotBlank() }
+        val ciKeyAlias = System.getenv("ANDROID_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+        val ciKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+            ?: ciKeystorePassword
+
+        if (ciKeystorePath != null && ciKeystorePassword != null && ciKeyAlias != null) {
+            getByName("debug") {
+                storeFile = file(ciKeystorePath)
+                storePassword = ciKeystorePassword
+                keyAlias = ciKeyAlias
+                keyPassword = ciKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
