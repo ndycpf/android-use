@@ -51,19 +51,20 @@ Check `screenOn` and `deviceLocked` in the `session-start` / `info` response:
 2. **Prefer launching apps directly** instead of swiping through launcher pages:
    - Run `scripts/android-use.sh apps <query>` to find the `packageName`.
    - Run `scripts/android-use.sh launch <packageName>` (or `launch-uri <uri>`).
-3. **Observe efficiently & pick the right tap method (in priority order)**:
-   - **1st choice — Element-targeted tap (highest accuracy, no coordinate drift)**:
-     - Run `scripts/android-use.sh tree` first — it is fast and compact.
-     - Tap labeled buttons, list items, or fields using `scripts/android-use.sh tap-text "<label>"`, `tap-id "<resourceId>"`, or `tap-node <nodeId>`.
-     - `tap-text` and `tap-id` re-query the **live** UI tree right before tapping and clip bounds to the visible screen, preventing misses from layout shifts or coordinate mistakes.
-   - **2nd choice — Set-of-Mark visual tap (best for icon-only buttons, dense UIs, or ambiguous labels)**:
-     - Run `scripts/android-use.sh screenshot-marked /tmp/marked.jpg` to get a screenshot overlaid with numbered boxes (`[1]`, `[2]`, …) plus a compact marks legend.
-     - Visually pick the badge number on the image and tap it directly with `scripts/android-use.sh tap-mark <markId>` — no pixel estimation required.
-   - **3rd choice — Raw coordinate tap (fallback for Canvas, games, or custom WebView surfaces absent from the UI tree)**:
-     - Run `scripts/android-use.sh screenshot /tmp/screen.jpg` and check the `X-Image-Width` / `X-Image-Height` headers (screenshots are downscaled to `maxDimension=1280` by default).
-     - **Never** pass scaled screenshot pixels into `tap <x> <y> pixel`. Always use `tap-image <x> <y> <imageWidth> <imageHeight>` or `tap <x> <y> normalized` (`0.0..1.0`).
+3. **Operate text-first — do NOT take screenshots by default**:
+   - Screenshots trigger Android OS rate limits (0.3–1s), image encoding/transfer overhead, and extra vision tokens. Treat screenshots **strictly as a fallback**.
+   - **Default fast loop (text-only, ~30ms, no rate limit)**:
+     - Run `scripts/android-use.sh marks` to get a compact numbered list of all live interactive elements (`[1] "Search" (editable)`, `[2] "Wi-Fi" (unchecked)`, … plus `unlabeled` count).
+     - Run `scripts/android-use.sh tree` when you also need non-interactive screen text (messages, prices, status labels).
+     - Tap directly with `tap-mark <id>`, `tap-text "<label>"`, `tap-id "<resourceId>"`, or `tap-node <nodeId>`. (`tap-text` / `tap-id` re-query the **live** UI tree right before tapping and clip bounds to the visible screen.)
+   - **Fallback 1 — Set-of-Mark visual tap (`screenshot-marked` + `tap-mark <id>`)**:
+     - Use **only** when `marks` shows unlabeled icon buttons you cannot disambiguate by text (`unlabeled > 0`), the layout is visually ambiguous, or repeated actions did not change the UI state.
+     - Run `scripts/android-use.sh screenshot-marked /tmp/marked.jpg`, visually pick the badge number, and run `tap-mark <markId>`.
+   - **Fallback 2 — Raw coordinate tap (`screenshot` + `tap-image` / `normalized`)**:
+     - Use **only** when `marks` / `tree` cannot see the target at all (Canvas, games, maps, custom WebView) or when inspecting visual content (photos, colors, charts).
+     - Check the `X-Image-Width` / `X-Image-Height` headers (downscaled to `maxDimension=1280` by default). **Never** pass scaled screenshot pixels into `tap <x> <y> pixel` — always use `tap-image <x> <y> <imageWidth> <imageHeight>` or `tap <x> <y> normalized` (`0.0..1.0`).
 4. **Focus before typing**:
-   - Always tap an editable field (`editable: true`, via `tap-text`, `tap-mark`, or `tap-node`) before calling `type`, `clear`, or `ime`.
+   - Always tap an editable field (`editable: true`, via `tap-mark`, `tap-text`, or `tap-node`) before calling `type`, `clear`, or `ime`.
    - If `type` returns `409 NO_FOCUSED_INPUT`, tap the input field again and retry.
 5. **Wait on UI transitions**:
    - Prefer `wait-text "<expected>" 5000` or `wait-gone "<spinner>" 5000` over fixed sleeps.
@@ -82,18 +83,20 @@ scripts/android-use.sh session
 scripts/android-use.sh session-start [label] [idleTimeoutMs]
 scripts/android-use.sh session-end
 
-# Observation (session required)
+# Observation — text-first (default, fast, no rate limit)
+scripts/android-use.sh marks [refresh:true|false] [compact|json]
 scripts/android-use.sh tree [maxDepth] [maxNodes]
-scripts/android-use.sh screenshot-marked [out.jpg] [jpeg|png] [maxDimension]
-scripts/android-use.sh marks [refresh:true|false]
-scripts/android-use.sh screenshot [out.jpg] [jpeg|png] [maxDimension]
 scripts/android-use.sh state [includeScreenshot:true|false] [annotate:true|false]
 
+# Observation — screenshot fallbacks (only when text/marks are insufficient)
+scripts/android-use.sh screenshot-marked [out.jpg] [jpeg|png] [maxDimension]
+scripts/android-use.sh screenshot [out.jpg] [jpeg|png] [maxDimension]
+
 # Element-targeted & Set-of-Mark actions (preferred, session required)
+scripts/android-use.sh tap-mark <markId>
 scripts/android-use.sh tap-text <text> [index] [exact:true|false]
 scripts/android-use.sh tap-id <resourceId> [index]
 scripts/android-use.sh tap-node <nodeId>
-scripts/android-use.sh tap-mark <markId>
 
 # Raw coordinate & navigation actions (fallback / gestures, session required)
 scripts/android-use.sh tap <x> <y> [pixel|normalized]

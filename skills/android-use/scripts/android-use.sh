@@ -68,14 +68,14 @@ Commands:
   session-start [label] [idleTimeoutMs]          Start a session (keeps overlay & screen awake)
   session-end                                    End active session (clears overlay & restores sleep)
   screenshot [out.jpg] [jpeg|png] [maxDimension] Capture binary screenshot to file (session required)
-  screenshot-marked [out.jpg] [jpeg|png] [maxDim] Capture Set-of-Mark numbered screenshot + print marks legend
-  marks [refresh:true|false]                     Get latest Set-of-Mark elements JSON
+  screenshot-marked [out.jpg] [jpeg|png] [maxDim] Fallback: Set-of-Mark numbered screenshot + marks legend
+  marks [refresh:true|false] [compact|json]      Get live interactive elements list (default: true compact, fast)
   tree [maxDepth] [maxNodes]                     Get normalized UI accessibility tree (session required)
   state [includeScreenshot:true|false] [annotate] Get combined device info, UI tree, optional screenshot/marks
   tap-text <text> [index] [exact:true|false]     Tap element by live text/description match (preferred)
   tap-id <resourceId> [index]                    Tap element by live resourceId match
   tap-node <nodeId>                              Tap element by nodeId from latest tree (e.g. n12)
-  tap-mark <markId>                              Tap numbered badge from latest screenshot-marked (e.g. 5)
+  tap-mark <markId>                              Tap numbered element from latest marks / screenshot-marked
   tap <x> <y> [pixel|normalized]                 Tap screen coordinate (fallback for canvas/custom UI)
   tap-image <x> <y> <imageWidth> <imageHeight>   Tap coordinate in screenshot image space
   long-press <x> <y> [durationMs]                Long-press coordinate
@@ -91,6 +91,21 @@ Commands:
   wait-text <text> [timeoutMs]                   Wait until text appears
   wait-gone <text> [timeoutMs]                   Wait until text disappears
 EOF
+}
+
+print_marks_compact() {
+  jq -r '
+    ([.marks[] | select((.text // "") == "" and (.contentDescription // "") == "" and (.hintText // "") == "")] | length) as $unlabeled |
+    "marks: \(.count) (unlabeled: \($unlabeled), display: \(.displayWidth)x\(.displayHeight))",
+    (.marks[] |
+      "[\(.markId)] " +
+      ((.text // .contentDescription // .hintText // .resourceId // .className // "(unlabeled)") | tostring) +
+      (if .editable then " (editable)"
+       elif .checkable then (if .checked then " (checked)" else " (unchecked)" end)
+       else "" end) +
+      " @(\(.center.x),\(.center.y))"
+    )
+  '
 }
 
 cmd="${1:-}"
@@ -172,21 +187,30 @@ case "$cmd" in
     ls -lh "$out"
     # Print compact marks legend for immediate use with tap-mark <id>.
     if command -v jq >/dev/null 2>&1; then
-      curl -sS "${AUTH_ARGS[@]}" "${URL}/v1/screen/marks" | jq -r '
-        .marks[] |
-        "[\(.markId)] " +
-        ((.text // .contentDescription // .hintText // .resourceId // .className // "element") | tostring) +
-        (if .editable then " (editable)" elif .checkable then " (checkable)" else "" end) +
-        " @(\(.center.x),\(.center.y))"
-      ' || true
+      curl -sS "${AUTH_ARGS[@]}" "${URL}/v1/screen/marks" | print_marks_compact || true
     else
       request GET "/v1/screen/marks" || true
     fi
     ;;
 
   marks)
-    refresh="${1:-false}"
-    request GET "/v1/screen/marks?refresh=${refresh}"
+    refresh="${1:-true}"
+    mode="${2:-compact}"
+    if [[ "$mode" == "compact" ]] && command -v jq >/dev/null 2>&1; then
+      tmp="$(mktemp)"
+      code="$(curl -sS -o "$tmp" -w '%{http_code}' "${AUTH_ARGS[@]}" \
+        "${URL}/v1/screen/marks?refresh=${refresh}")"
+      if (( code < 200 || code >= 300 )); then
+        pp < "$tmp"
+        rm -f "$tmp"
+        echo "HTTP ${code} (GET /v1/screen/marks?refresh=${refresh})" >&2
+        exit 1
+      fi
+      print_marks_compact < "$tmp"
+      rm -f "$tmp"
+    else
+      request GET "/v1/screen/marks?refresh=${refresh}"
+    fi
     ;;
 
   tree)
