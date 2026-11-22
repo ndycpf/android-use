@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+URL="${ANDROID_USE_URL:-${URL:-http://127.0.0.1:8765}}"
+TOKEN="${ANDROID_USE_TOKEN:-${TOKEN:-}}"
+
+AUTH_ARGS=()
+if [[ -n "$TOKEN" ]]; then
+  AUTH_ARGS=(-H "Authorization: Bearer ${TOKEN}")
+fi
+
+pp() {
+  if command -v jq >/dev/null 2>&1; then
+    jq . 2>/dev/null || cat
+  else
+    cat
+    echo
+  fi
+}
+
+request() {
+  local method="$1"
+  local path="$2"
+  local body="${3:-}"
+  local tmp
+  tmp="$(mktemp)"
+  local code
+
+  if [[ -n "$body" ]]; then
+    code="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "${AUTH_ARGS[@]}" \
+      -H "Content-Type: application/json" \
+      -d "$body" \
+      "${URL}${path}")"
+  else
+    code="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "${AUTH_ARGS[@]}" \
+      "${URL}${path}")"
+  fi
+
+  pp < "$tmp"
+  rm -f "$tmp"
+
+  if (( code < 200 || code >= 300 )); then
+    echo "HTTP ${code} (${method} ${path})" >&2
+    return 1
+  fi
+}
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+usage() {
+  cat <<EOF
+Usage:
+  ANDROID_USE_URL=http://<host>:8765 ANDROID_USE_TOKEN=<token> $(basename "$0") <command> [args...]
+
+Commands:
+  health                                         Check server and accessibility status
+  info                                           Get display resolution, rotation, and foreground app
+  screenshot [out.jpg] [jpeg|png] [maxDimension] Capture binary screenshot to file
+  tree [maxDepth] [maxNodes]                     Get normalized UI accessibility tree
+  state [includeScreenshot:true|false]           Get combined device info, UI tree, and optional screenshot
+  tap <x> <y> [pixel|normalized]                 Tap screen coordinate
+  tap-image <x> <y> <imageWidth> <imageHeight>   Tap coordinate in screenshot image space
+  long-press <x> <y> [durationMs]                Long-press coordinate
+  swipe [sx sy ex ey pixel|normalized durMs]     Swipe (default: scroll up 0.5,0.8 -> 0.5,0.2 normalized)
+  key <BACK|HOME|RECENTS|NOTIFICATIONS|...>      Press global navigation key
+  type <text> [clearFirst] [submit]              Type text into focused field
+  clear                                          Clear focused text field
+  ime [enter]                                    Trigger IME action
+  apps [query]                                   List launchable apps
+  launch <packageName>                           Launch app by package name
+  launch-uri <uri>                               Open URI or deep link
+  wait-sleep [durationMs]                        Sleep wait
+  wait-text <text> [timeoutMs]                   Wait until text appears
+  wait-gone <text> [timeoutMs]                   Wait until text disappears
+EOF
+}
+
+cmd="${1:-}"
+if [[ -z "$cmd" || "$cmd" == "-h" || "$cmd" == "--help" ]]; then
+  usage
+  exit 0
+fi
+shift
+
+case "$cmd" in
+  health)
+    request GET "/v1/health"
+    ;;
+
+  info)
+    request GET "/v1/device/info"
+    ;;
+
+  screenshot)
+    out="${1:-screen.jpg}"
+    fmt="${2:-jpeg}"
+    max_dim="${3:-1280}"
+    tmp_hdr="$(mktemp)"
+    code="$(curl -sS -D "$tmp_hdr" -o "$out" -w '%{http_code}' "${AUTH_ARGS[@]}" \
+      "${URL}/v1/screen/screenshot?encoding=binary&format=${fmt}&maxDimension=${max_dim}")"
+    if (( code < 200 || code >= 300 )); then
+      cat "$out" >&2 || true
+      rm -f "$tmp_hdr"
+      echo "HTTP ${code} (GET /v1/screen/screenshot)" >&2
+      exit 1
+    fi
+    grep -iE '^(Content-Type:|X-)' "$tmp_hdr" || true
+    rm -f "$tmp_hdr"
+    ls -lh "$out"
+    ;;
+
+  tree)
+    max_depth="${1:-30}"
+    max_nodes="${2:-400}"
+    request GET "/v1/screen/tree?maxDepth=${max_depth}&maxNodes=${max_nodes}"
+    ;;
+
+  state)
+    inc="${1:-false}"
+    request GET "/v1/screen/state?includeScreenshot=${inc}"
+    ;;
+
+  tap)
+    x="${1:?usage: tap <x> <y> [pixel|normalized]}"
+    y="${2:?usage: tap <x> <y> [pixel|normalized]}"
+    space="${3:-pixel}"
+    request POST "/v1/actions/tap" "{\"x\":${x},\"y\":${y},\"coordinateSpace\":\"${space}\"}"
+    ;;
+
+  tap-image)
+    x="${1:?usage: tap-image <x> <y> <imageWidth> <imageHeight>}"
+    y="${2:?usage: tap-image <x> <y> <imageWidth> <imageHeight>}"
+    img_w="${3:?usage: tap-image <x> <y> <imageWidth> <imageHeight>}"
+    img_h="${4:?usage: tap-image <x> <y> <imageWidth> <imageHeight>}"
+    request POST "/v1/actions/tap" \
+      "{\"x\":${x},\"y\":${y},\"coordinateSpace\":\"image\",\"imageWidth\":${img_w},\"imageHeight\":${img_h}}"
+    ;;
+
+  long-press)
+    x="${1:?usage: long-press <x> <y> [durationMs]}"
+    y="${2:?usage: long-press <x> <y> [durationMs]}"
+    dur="${3:-600}"
+    request POST "/v1/actions/long-press" "{\"x\":${x},\"y\":${y},\"durationMs\":${dur}}"
+    ;;
+
+  swipe)
+    sx="${1:-0.5}"
+    sy="${2:-0.8}"
+    ex="${3:-0.5}"
+    ey="${4:-0.2}"
+    space="${5:-normalized}"
+    dur="${6:-300}"
+    request POST "/v1/actions/swipe" \
+      "{\"startX\":${sx},\"startY\":${sy},\"endX\":${ex},\"endY\":${ey},\"coordinateSpace\":\"${space}\",\"durationMs\":${dur}}"
+    ;;
+
+  key)
+    k="${1:?usage: key <BACK|HOME|RECENTS|NOTIFICATIONS|QUICK_SETTINGS|DISMISS_NOTIFICATION_SHADE>}"
+    request POST "/v1/actions/key" "{\"key\":\"${k}\"}"
+    ;;
+
+  type)
+    text="${1:?usage: type <text> [clearFirst:true|false] [submit:true|false]}"
+    clear_first="${2:-false}"
+    submit="${3:-false}"
+    if command -v jq >/dev/null 2>&1; then
+      payload="$(jq -n --arg t "$text" --argjson c "$clear_first" --argjson s "$submit" \
+        '{text:$t, clearFirst:$c, submit:$s}')"
+    else
+      payload="{\"text\":\"$(json_escape "$text")\",\"clearFirst\":${clear_first},\"submit\":${submit}}"
+    fi
+    request POST "/v1/actions/type" "$payload"
+    ;;
+
+  clear)
+    request POST "/v1/actions/clear"
+    ;;
+
+  ime)
+    action="${1:-enter}"
+    request POST "/v1/actions/ime" "{\"action\":\"$(json_escape "$action")\"}"
+    ;;
+
+  apps)
+    q="${1:-}"
+    tmp="$(mktemp)"
+    if [[ -n "$q" ]]; then
+      code="$(curl -sS -G -o "$tmp" -w '%{http_code}' "${AUTH_ARGS[@]}" \
+        --data-urlencode "q=${q}" "${URL}/v1/apps")"
+    else
+      code="$(curl -sS -o "$tmp" -w '%{http_code}' "${AUTH_ARGS[@]}" "${URL}/v1/apps")"
+    fi
+    pp < "$tmp"
+    rm -f "$tmp"
+    if (( code < 200 || code >= 300 )); then
+      echo "HTTP ${code} (GET /v1/apps)" >&2
+      exit 1
+    fi
+    ;;
+
+  launch)
+    pkg="${1:?usage: launch <packageName>}"
+    request POST "/v1/apps/launch" "{\"packageName\":\"$(json_escape "$pkg")\"}"
+    ;;
+
+  launch-uri)
+    uri="${1:?usage: launch-uri <uri>}"
+    request POST "/v1/apps/launch" "{\"uri\":\"$(json_escape "$uri")\"}"
+    ;;
+
+  wait-sleep)
+    ms="${1:-1000}"
+    request POST "/v1/wait" "{\"durationMs\":${ms}}"
+    ;;
+
+  wait-text)
+    text="${1:?usage: wait-text <text> [timeoutMs]}"
+    timeout="${2:-5000}"
+    if command -v jq >/dev/null 2>&1; then
+      payload="$(jq -n --arg t "$text" --argjson to "$timeout" '{text:$t, timeoutMs:$to}')"
+    else
+      payload="{\"text\":\"$(json_escape "$text")\",\"timeoutMs\":${timeout}}"
+    fi
+    request POST "/v1/wait" "$payload"
+    ;;
+
+  wait-gone)
+    text="${1:?usage: wait-gone <text> [timeoutMs]}"
+    timeout="${2:-5000}"
+    if command -v jq >/dev/null 2>&1; then
+      payload="$(jq -n --arg t "$text" --argjson to "$timeout" '{text:$t, gone:true, timeoutMs:$to}')"
+    else
+      payload="{\"text\":\"$(json_escape "$text")\",\"gone\":true,\"timeoutMs\":${timeout}}"
+    fi
+    request POST "/v1/wait" "$payload"
+    ;;
+
+  *)
+    echo "Unknown command: $cmd" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
