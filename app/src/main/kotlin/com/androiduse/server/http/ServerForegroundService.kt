@@ -11,8 +11,14 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import com.androiduse.R
+import com.androiduse.android.AccessibilityInputDispatcher
+import com.androiduse.android.AccessibilityOverlayController
 import com.androiduse.android.AccessibilityScreenCapturer
+import com.androiduse.android.AccessibilityTextInputController
+import com.androiduse.android.AccessibilityUiTreeInspector
+import com.androiduse.android.AndroidAppController
 import com.androiduse.android.AndroidDeviceInfoProvider
+import com.androiduse.android.AndroidDevicePowerController
 import com.androiduse.android.ServerPreferences
 import com.androiduse.core.AccessibilityServiceRegistry
 import com.androiduse.core.DefaultDeviceController
@@ -20,19 +26,31 @@ import com.androiduse.core.NetworkAddressHelper
 import com.androiduse.core.ResilientScreenCapturer
 import com.androiduse.core.ServerState
 import com.androiduse.core.ServerStateRegistry
+import com.androiduse.core.SessionManager
 import com.androiduse.ui.MainActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 /**
- * Foreground service hosting the embedded local HTTP server so AI agents can keep
- * sending requests while target Android apps are in the foreground.
+ * Foreground service hosting the embedded local HTTP server, session idle timeout watcher,
+ * and persistent session overlay lifecycle.
  */
 class ServerForegroundService : Service() {
 
     internal var serverStateRegistry: ServerStateRegistry = ServerStateRegistry.default
     internal var accessibilityRegistry: AccessibilityServiceRegistry = AccessibilityServiceRegistry.default
+    internal var sessionManager: SessionManager = SessionManager.default
 
     private var httpServer: LocalHttpServer? = null
-    private var overlayController: com.androiduse.android.AccessibilityOverlayController? = null
+    private var overlayController: AccessibilityOverlayController? = null
+    private var serviceScope: CoroutineScope? = null
+    private var idleWatcherJob: Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -41,6 +59,12 @@ class ServerForegroundService : Service() {
             ACTION_STOP -> {
                 stopServerAndSelf()
                 return START_NOT_STICKY
+            }
+
+            ACTION_END_SESSION -> {
+                sessionManager.endSession()
+                overlayController?.setSessionActive(active = false)
+                return START_STICKY
             }
 
             else -> {
@@ -55,10 +79,7 @@ class ServerForegroundService : Service() {
     }
 
     override fun onDestroy() {
-        overlayController?.clear()
-        overlayController = null
-        httpServer?.stop()
-        httpServer = null
+        teardownServer()
         if (serverStateRegistry.state.value.running) {
             serverStateRegistry.markStopped()
         }
@@ -97,30 +118,38 @@ class ServerForegroundService : Service() {
             accessibilityRegistry = accessibilityRegistry,
             serverVersion = versionName,
         )
+        val powerController = AndroidDevicePowerController(applicationContext)
         val screenCapturer = ResilientScreenCapturer(
             delegate = AccessibilityScreenCapturer(
                 context = applicationContext,
                 accessibilityRegistry = accessibilityRegistry,
             ),
         )
-        val uiTreeInspector = com.androiduse.android.AccessibilityUiTreeInspector(
+        val uiTreeInspector = AccessibilityUiTreeInspector(
             accessibilityRegistry = accessibilityRegistry,
         )
-        val inputDispatcher = com.androiduse.android.AccessibilityInputDispatcher(
+        val inputDispatcher = AccessibilityInputDispatcher(
             accessibilityRegistry = accessibilityRegistry,
         )
-        val textInputController = com.androiduse.android.AccessibilityTextInputController(
+        val textInputController = AccessibilityTextInputController(
             context = applicationContext,
             accessibilityRegistry = accessibilityRegistry,
         )
-        val appController = com.androiduse.android.AndroidAppController(
+        val appController = AndroidAppController(
             context = applicationContext,
         )
-        val overlay = com.androiduse.android.AccessibilityOverlayController(
+        val overlay = AccessibilityOverlayController(
             accessibilityRegistry = accessibilityRegistry,
-            isEnabledProvider = { prefs.isOverlayEnabled() },
         )
         overlayController = overlay
+
+        sessionManager.setStateChangeListener { activeSession ->
+            overlay.setSessionActive(
+                active = activeSession != null,
+                label = activeSession?.label,
+                keepAwake = activeSession?.keepAwake ?: false,
+            )
+        }
 
         val controller = DefaultDeviceController(
             accessibilityRegistry = accessibilityRegistry,
@@ -130,6 +159,8 @@ class ServerForegroundService : Service() {
             inputDispatcher = inputDispatcher,
             textInputController = textInputController,
             appController = appController,
+            sessionManager = sessionManager,
+            powerController = powerController,
             overlayFeedback = overlay,
             serverVersion = versionName,
         )
@@ -143,26 +174,46 @@ class ServerForegroundService : Service() {
         try {
             server.start()
             httpServer = server
+            startIdleTimeoutWatcher()
             serverStateRegistry.markRunning(
                 host = host,
                 port = port,
                 authRequired = authToken != null,
             )
         } catch (e: Throwable) {
-            overlay.clear()
-            overlayController = null
-            server.stop()
+            teardownServer()
             serverStateRegistry.markStopped(e.message ?: "Failed to start local HTTP server.")
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
     }
 
-    private fun stopServerAndSelf() {
+    private fun startIdleTimeoutWatcher() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        serviceScope = scope
+        idleWatcherJob = scope.launch {
+            while (isActive) {
+                delay(IDLE_CHECK_INTERVAL_MS)
+                sessionManager.checkIdleTimeout()
+            }
+        }
+    }
+
+    private fun teardownServer() {
+        idleWatcherJob?.cancel()
+        idleWatcherJob = null
+        serviceScope?.cancel()
+        serviceScope = null
+        sessionManager.endSession()
+        sessionManager.setStateChangeListener(null)
         overlayController?.clear()
         overlayController = null
         httpServer?.stop()
         httpServer = null
+    }
+
+    private fun stopServerAndSelf() {
+        teardownServer()
         serverStateRegistry.markStopped()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -186,6 +237,13 @@ class ServerForegroundService : Service() {
             PendingIntent.FLAG_IMMUTABLE,
         )
 
+        val endSessionIntent = PendingIntent.getService(
+            this,
+            2,
+            endSessionIntent(this),
+            PendingIntent.FLAG_IMMUTABLE,
+        )
+
         val stopIntent = PendingIntent.getService(
             this,
             1,
@@ -202,6 +260,13 @@ class ServerForegroundService : Service() {
             .addAction(
                 Notification.Action.Builder(
                     null,
+                    getString(R.string.end_session),
+                    endSessionIntent,
+                ).build(),
+            )
+            .addAction(
+                Notification.Action.Builder(
+                    null,
                     getString(R.string.stop_server),
                     stopIntent,
                 ).build(),
@@ -212,6 +277,7 @@ class ServerForegroundService : Service() {
     companion object {
         const val ACTION_START: String = "com.androiduse.action.START_SERVER"
         const val ACTION_STOP: String = "com.androiduse.action.STOP_SERVER"
+        const val ACTION_END_SESSION: String = "com.androiduse.action.END_SESSION"
         const val EXTRA_HOST: String = "host"
         const val EXTRA_PORT: String = "port"
         const val EXTRA_AUTH_TOKEN: String = "auth_token"
@@ -219,6 +285,7 @@ class ServerForegroundService : Service() {
         private const val CHANNEL_ID: String = "android_use_server"
         private const val NOTIFICATION_ID: Int = 1001
         private const val DEFAULT_VERSION: String = "0.1.0"
+        private const val IDLE_CHECK_INTERVAL_MS: Long = 5_000L
 
         fun startIntent(
             context: Context,
@@ -237,6 +304,11 @@ class ServerForegroundService : Service() {
         fun stopIntent(context: Context): Intent =
             Intent(context, ServerForegroundService::class.java).apply {
                 action = ACTION_STOP
+            }
+
+        fun endSessionIntent(context: Context): Intent =
+            Intent(context, ServerForegroundService::class.java).apply {
+                action = ACTION_END_SESSION
             }
     }
 }

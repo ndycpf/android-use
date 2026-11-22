@@ -576,6 +576,48 @@ class LocalHttpRoutesTest {
             return deviceInfo
         }
 
+        override suspend fun getSession(): com.androiduse.protocol.SessionStatusResponse {
+            return com.androiduse.protocol.SessionStatusResponse(
+                active = true,
+                sessionId = "s1",
+                label = "agent",
+                keepAwake = true,
+                screenOn = true,
+                deviceLocked = false,
+            )
+        }
+
+        override suspend fun startSession(
+            request: com.androiduse.protocol.StartSessionRequest,
+        ): com.androiduse.protocol.SessionStatusResponse {
+            return com.androiduse.protocol.SessionStatusResponse(
+                active = true,
+                sessionId = "s1",
+                label = request.label,
+                keepAwake = request.keepAwake,
+                idleTimeoutMs = request.idleTimeoutMs,
+                screenOn = true,
+                deviceLocked = false,
+            )
+        }
+
+        override suspend fun endSession(): com.androiduse.protocol.SessionStatusResponse {
+            return com.androiduse.protocol.SessionStatusResponse(
+                active = false,
+                screenOn = true,
+                deviceLocked = false,
+            )
+        }
+
+        override suspend fun wakeDevice(): com.androiduse.protocol.WakeResponse {
+            return com.androiduse.protocol.WakeResponse(
+                ok = true,
+                screenOn = true,
+                deviceLocked = false,
+                timestampMs = 15L,
+            )
+        }
+
         override suspend fun captureScreenshot(options: CaptureOptions): CaptureResult {
             lastCaptureOptions = options
             screenshotError?.let { throw it }
@@ -744,5 +786,42 @@ class LocalHttpRoutesTest {
         val waitBody = json.decodeFromString<com.androiduse.protocol.WaitResponse>(waitRes.bodyAsText())
         assertTrue(waitBody.matched)
         assertEquals("n1", waitBody.matchedNode?.nodeId)
+    }
+
+    @Test
+    fun `session start, status, end, and device wake endpoints work cleanly`() = testApplication {
+        application {
+            configureAndroidUseHttp(FakeDeviceController())
+        }
+
+        val startEmpty = client.post("/v1/session/start")
+        assertEquals(HttpStatusCode.OK, startEmpty.status)
+        assertTrue(
+            json.decodeFromString<com.androiduse.protocol.SessionStatusResponse>(startEmpty.bodyAsText()).active,
+        )
+
+        val startLabeled = client.post("/v1/session/start") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"label":"demo","keepAwake":true,"idleTimeoutMs":120000}""")
+        }
+        assertEquals(HttpStatusCode.OK, startLabeled.status)
+        val started = json.decodeFromString<com.androiduse.protocol.SessionStatusResponse>(startLabeled.bodyAsText())
+        assertEquals("demo", started.label)
+        assertEquals(120_000L, started.idleTimeoutMs)
+
+        val getRes = client.get("/v1/session")
+        assertEquals(HttpStatusCode.OK, getRes.status)
+
+        val endRes = client.post("/v1/session/end")
+        assertEquals(HttpStatusCode.OK, endRes.status)
+        assertFalse(
+            json.decodeFromString<com.androiduse.protocol.SessionStatusResponse>(endRes.bodyAsText()).active,
+        )
+
+        val wakeRes = client.post("/v1/device/wake")
+        assertEquals(HttpStatusCode.OK, wakeRes.status)
+        val wakeBody = json.decodeFromString<com.androiduse.protocol.WakeResponse>(wakeRes.bodyAsText())
+        assertTrue(wakeBody.ok)
+        assertTrue(wakeBody.screenOn)
     }
 }

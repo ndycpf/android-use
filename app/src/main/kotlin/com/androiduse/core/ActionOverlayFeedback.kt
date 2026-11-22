@@ -3,12 +3,18 @@ package com.androiduse.core
 import com.androiduse.protocol.UiPoint
 
 /**
- * Optional visual feedback overlay shown on-device during agent capture/actions.
+ * Visual feedback overlay shown continuously during an active session (ADR-0006),
+ * with transient markers for individual actions and clean suppression during screenshots.
  */
 interface ActionOverlayFeedback {
     /**
-     * Temporarily hides any active overlay before taking a screenshot so AI agent
-     * images remain completely clean.
+     * Attaches or detaches the persistent session overlay and controls screen keep-awake.
+     */
+    fun setSessionActive(active: Boolean, label: String? = null, keepAwake: Boolean = true)
+
+    /**
+     * Temporarily suppresses drawing before taking a screenshot so AI agent images remain
+     * clean while keeping the window attached (and `FLAG_KEEP_SCREEN_ON` uninterrupted).
      */
     suspend fun beforeScreenshot()
 
@@ -20,6 +26,7 @@ interface ActionOverlayFeedback {
 }
 
 object NoOpActionOverlayFeedback : ActionOverlayFeedback {
+    override fun setSessionActive(active: Boolean, label: String?, keepAwake: Boolean) = Unit
     override suspend fun beforeScreenshot() = Unit
     override fun showCaptured() = Unit
     override fun showTap(point: UiPoint, longPress: Boolean) = Unit

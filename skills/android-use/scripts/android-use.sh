@@ -61,10 +61,14 @@ Usage:
   ANDROID_USE_URL=http://<host>:8765 ANDROID_USE_TOKEN=<token> $(basename "$0") <command> [args...]
 
 Commands:
-  health                                         Check server and accessibility status
-  info                                           Get display resolution, rotation, and foreground app
-  screenshot [out.jpg] [jpeg|png] [maxDimension] Capture binary screenshot to file
-  tree [maxDepth] [maxNodes]                     Get normalized UI accessibility tree
+  health                                         Check server, accessibility, and session status
+  info                                           Get display resolution, power/lock state, and foreground app
+  wake                                           Attempt to wake display from sleep
+  session                                        Get active session status
+  session-start [label] [idleTimeoutMs]          Start a session (keeps overlay & screen awake)
+  session-end                                    End active session (clears overlay & restores sleep)
+  screenshot [out.jpg] [jpeg|png] [maxDimension] Capture binary screenshot to file (session required)
+  tree [maxDepth] [maxNodes]                     Get normalized UI accessibility tree (session required)
   state [includeScreenshot:true|false]           Get combined device info, UI tree, and optional screenshot
   tap <x> <y> [pixel|normalized]                 Tap screen coordinate
   tap-image <x> <y> <imageWidth> <imageHeight>   Tap coordinate in screenshot image space
@@ -97,6 +101,33 @@ case "$cmd" in
 
   info)
     request GET "/v1/device/info"
+    ;;
+
+  wake)
+    request POST "/v1/device/wake"
+    ;;
+
+  session)
+    request GET "/v1/session"
+    ;;
+
+  session-start)
+    label="${1:-}"
+    timeout="${2:-600000}"
+    if [[ -n "$label" ]]; then
+      if command -v jq >/dev/null 2>&1; then
+        payload="$(jq -n --arg l "$label" --argjson to "$timeout" '{label:$l, idleTimeoutMs:$to}')"
+      else
+        payload="{\"label\":\"$(json_escape "$label")\",\"idleTimeoutMs\":${timeout}}"
+      fi
+    else
+      payload="{\"idleTimeoutMs\":${timeout}}"
+    fi
+    request POST "/v1/session/start" "$payload"
+    ;;
+
+  session-end)
+    request POST "/v1/session/end"
     ;;
 
   screenshot)

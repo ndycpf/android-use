@@ -11,6 +11,7 @@ This directory documents the core architectural decisions and the incremental, p
 | [0003](0003-screen-capture-strategy.md) | Phased Screen Capture Strategy (`AccessibilityService` First, Optional `MediaProjection` Later) | Accepted |
 | [0004](0004-local-http-json-api-and-future-mcp-agent-modes.md) | Local HTTP/JSON API v1 with Extension Path to MCP and In-App Agent | Accepted |
 | [0005](0005-phased-implementation-roadmap.md) | Incremental Phase-by-Phase Implementation Roadmap | Accepted |
+| [0006](0006-session-lifecycle-overlay-and-power-management.md) | Explicit Session Lifecycle, Persistent Overlay, and Power Management | Accepted |
 
 ## High-Level Architecture
 

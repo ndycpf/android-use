@@ -9,6 +9,8 @@ import com.androiduse.R
 import com.androiduse.android.AndroidUseAccessibilityService
 import com.androiduse.core.AccessibilityServiceRegistry
 import com.androiduse.core.ServerStateRegistry
+import com.androiduse.core.SessionManager
+import com.androiduse.protocol.StartSessionRequest
 import com.androiduse.server.http.ServerForegroundService
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -30,6 +32,7 @@ class MainActivityTest {
     fun tearDown() {
         AccessibilityServiceRegistry.default.clear()
         ServerStateRegistry.default.reset()
+        SessionManager.default.reset()
     }
 
     @Test
@@ -107,5 +110,23 @@ class MainActivityTest {
         assertEquals(ServerForegroundService.ACTION_START, startIntent.action)
         assertEquals("100.64.10.20", startIntent.getStringExtra(ServerForegroundService.EXTRA_HOST))
         assertFalse(startIntent.getStringExtra(ServerForegroundService.EXTRA_AUTH_TOKEN).isNullOrBlank())
+    }
+
+    @Test
+    fun `displays active session status and allows ending session from UI`() {
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        val sessionText = activity.findViewById<TextView>(R.id.sessionStatusValueText)
+        val endButton = activity.findViewById<Button>(R.id.endSessionButton)
+
+        assertEquals(activity.getString(R.string.session_status_inactive), sessionText.text.toString())
+        assertFalse(endButton.isEnabled)
+
+        SessionManager.default.startSession(StartSessionRequest(label = "my-agent", keepAwake = true))
+        assertTrue(sessionText.text.toString().contains("my-agent"))
+        assertTrue(endButton.isEnabled)
+
+        endButton.performClick()
+        assertNull(SessionManager.default.currentSession())
+        assertFalse(endButton.isEnabled)
     }
 }

@@ -17,10 +17,12 @@ import androidx.core.view.WindowInsetsCompat
 import com.androiduse.R
 import com.androiduse.android.ServerPreferences
 import com.androiduse.core.AccessibilityServiceRegistry
+import com.androiduse.core.ActiveSession
 import com.androiduse.core.BindMode
 import com.androiduse.core.NetworkAddressHelper
 import com.androiduse.core.ServerState
 import com.androiduse.core.ServerStateRegistry
+import com.androiduse.core.SessionManager
 import com.androiduse.server.http.ServerForegroundService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +34,7 @@ class MainActivity : Activity() {
 
     internal var registry: AccessibilityServiceRegistry = AccessibilityServiceRegistry.default
     internal var serverStateRegistry: ServerStateRegistry = ServerStateRegistry.default
+    internal var sessionManager: SessionManager = SessionManager.default
     internal var tailscaleIpDetector: () -> String? = { NetworkAddressHelper.detectTailscaleIpv4() }
     internal var lanIpDetector: () -> String? = { NetworkAddressHelper.detectLanIpv4() }
 
@@ -43,6 +46,8 @@ class MainActivity : Activity() {
     private lateinit var bindModeTailscale: RadioButton
     private lateinit var bindModeAll: RadioButton
     private lateinit var toggleServerButton: Button
+    private lateinit var sessionStatusValueText: TextView
+    private lateinit var endSessionButton: Button
     private lateinit var authTokenContainer: View
     private lateinit var authTokenValueText: TextView
     private lateinit var rotateTokenButton: Button
@@ -79,6 +84,8 @@ class MainActivity : Activity() {
         bindModeTailscale = findViewById(R.id.bindModeTailscale)
         bindModeAll = findViewById(R.id.bindModeAll)
         toggleServerButton = findViewById(R.id.toggleServerButton)
+        sessionStatusValueText = findViewById(R.id.sessionStatusValueText)
+        endSessionButton = findViewById(R.id.endSessionButton)
         authTokenContainer = findViewById(R.id.authTokenContainer)
         authTokenValueText = findViewById(R.id.authTokenValueText)
         rotateTokenButton = findViewById(R.id.rotateTokenButton)
@@ -112,10 +119,11 @@ class MainActivity : Activity() {
             Toast.makeText(this, R.string.copied_toast, Toast.LENGTH_SHORT).show()
         }
 
-        val overlaySwitch = findViewById<android.widget.Switch>(R.id.overlaySwitch)
-        overlaySwitch.isChecked = prefs.isOverlayEnabled()
-        overlaySwitch.setOnCheckedChangeListener { _, isChecked ->
-            prefs.setOverlayEnabled(isChecked)
+        endSessionButton.setOnClickListener {
+            sessionManager.endSession()
+            if (serverStateRegistry.state.value.running) {
+                startService(ServerForegroundService.endSessionIntent(this))
+            }
         }
 
         toggleServerButton.setOnClickListener {
@@ -129,6 +137,7 @@ class MainActivity : Activity() {
         refreshDetectedIps()
         renderAccessibilityStatus(registry.isConnected.value)
         renderServerState(serverStateRegistry.state.value)
+        renderSessionState(sessionManager.state.value)
     }
 
     override fun onStart() {
@@ -143,6 +152,11 @@ class MainActivity : Activity() {
         scope.launch {
             serverStateRegistry.state.collect { state ->
                 renderServerState(state)
+            }
+        }
+        scope.launch {
+            sessionManager.state.collect { session ->
+                renderSessionState(session)
             }
         }
     }
@@ -209,6 +223,18 @@ class MainActivity : Activity() {
         statusValueText.setText(textRes)
     }
 
+    private fun renderSessionState(session: ActiveSession?) {
+        if (session == null) {
+            sessionStatusValueText.setText(R.string.session_status_inactive)
+            endSessionButton.isEnabled = false
+        } else {
+            val label = session.label ?: getString(R.string.session_default_label)
+            val suffix = if (session.keepAwake) "$label, keep awake" else label
+            sessionStatusValueText.text = getString(R.string.session_status_active, suffix)
+            endSessionButton.isEnabled = true
+        }
+    }
+
     private fun renderServerState(state: ServerState) {
         serverStatusValueText.text = when {
             state.running && state.authRequired ->
@@ -261,9 +287,9 @@ class MainActivity : Activity() {
         val port = state.port
         val needsAuth = if (state.running) state.authRequired else selectedBindMode != BindMode.LOOPBACK
         return if (needsAuth) {
-            "curl -H \"Authorization: Bearer $currentAuthToken\" \"http://$host:$port/v1/screen/screenshot?encoding=binary\" -o screen.jpg"
+            "curl -X POST -H \"Authorization: Bearer $currentAuthToken\" http://$host:$port/v1/session/start"
         } else {
-            "curl \"http://$host:$port/v1/screen/screenshot?encoding=binary\" -o screen.jpg"
+            "curl -X POST http://$host:$port/v1/session/start"
         }
     }
 
@@ -273,14 +299,16 @@ class MainActivity : Activity() {
         val needsAuth = if (state.running) state.authRequired else selectedBindMode != BindMode.LOOPBACK
         return if (needsAuth) {
             """
-            curl -H "Authorization: Bearer $currentAuthToken" http://$host:$port/v1/health
+            curl -X POST -H "Authorization: Bearer $currentAuthToken" http://$host:$port/v1/session/start
             curl -H "Authorization: Bearer $currentAuthToken" "http://$host:$port/v1/screen/screenshot?encoding=binary" -o screen.jpg
+            curl -X POST -H "Authorization: Bearer $currentAuthToken" http://$host:$port/v1/session/end
             """.trimIndent()
         } else {
             """
             adb forward tcp:$port tcp:$port
-            curl http://$host:$port/v1/health
+            curl -X POST http://$host:$port/v1/session/start
             curl "http://$host:$port/v1/screen/screenshot?encoding=binary" -o screen.jpg
+            curl -X POST http://$host:$port/v1/session/end
             """.trimIndent()
         }
     }

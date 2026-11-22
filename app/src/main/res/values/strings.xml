@@ -17,6 +17,12 @@
     <string name="start_server">Start Server</string>
     <string name="stop_server">Stop Server</string>
 
+    <string name="session_heading">Agent Session</string>
+    <string name="session_status_inactive">Inactive (overlay &amp; keep-awake off)</string>
+    <string name="session_status_active">Active (%1$s)</string>
+    <string name="session_default_label">default</string>
+    <string name="end_session">End Session</string>
+
     <string name="bind_mode_heading">Network Interface</string>
     <string name="bind_mode_loopback">Loopback only (127.0.0.1 / adb forward)</string>
     <string name="bind_mode_tailscale">Tailscale (%1$s)</string>
@@ -28,7 +34,6 @@
     <string name="rotate_token">Rotate Token</string>
     <string name="copy_command">Copy curl Command</string>
     <string name="copied_toast">Copied to clipboard</string>
-    <string name="overlay_switch_label">Visual action overlay (tap, swipe &amp; capture indicator)</string>
 
     <string name="server_notification_channel_name">android-use Local Server</string>
     <string name="server_notification_title">android-use server running</string>

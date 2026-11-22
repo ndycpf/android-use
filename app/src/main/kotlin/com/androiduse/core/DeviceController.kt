@@ -11,6 +11,8 @@ import com.androiduse.protocol.LaunchAppRequest
 import com.androiduse.protocol.LaunchAppResponse
 import com.androiduse.protocol.LongPressRequest
 import com.androiduse.protocol.ScreenStateResponse
+import com.androiduse.protocol.SessionStatusResponse
+import com.androiduse.protocol.StartSessionRequest
 import com.androiduse.protocol.SwipeRequest
 import com.androiduse.protocol.TapRequest
 import com.androiduse.protocol.TextActionResponse
@@ -18,6 +20,7 @@ import com.androiduse.protocol.TypeTextRequest
 import com.androiduse.protocol.UiTreeResponse
 import com.androiduse.protocol.WaitRequest
 import com.androiduse.protocol.WaitResponse
+import com.androiduse.protocol.WakeResponse
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -33,6 +36,10 @@ interface DeviceInfoProvider {
 interface DeviceController {
     suspend fun getHealth(): HealthResponse
     suspend fun getDeviceInfo(): DeviceInfoResponse
+    suspend fun getSession(): SessionStatusResponse
+    suspend fun startSession(request: StartSessionRequest = StartSessionRequest()): SessionStatusResponse
+    suspend fun endSession(): SessionStatusResponse
+    suspend fun wakeDevice(): WakeResponse
     suspend fun captureScreenshot(options: CaptureOptions = CaptureOptions()): CaptureResult
     suspend fun getUiTree(options: UiTreeOptions = UiTreeOptions()): UiTreeResponse
     suspend fun getScreenState(
@@ -60,6 +67,8 @@ class DefaultDeviceController(
     private val inputDispatcher: InputDispatcher,
     private val textInputController: TextInputController,
     private val appController: AppController,
+    private val sessionManager: SessionManager = SessionManager(),
+    private val powerController: DevicePowerController = StaticDevicePowerController(),
     private val overlayFeedback: ActionOverlayFeedback = NoOpActionOverlayFeedback,
     private val serverVersion: String,
     private val clockMs: () -> Long = { System.currentTimeMillis() },
@@ -68,25 +77,72 @@ class DefaultDeviceController(
     private val actionMutex = Mutex()
 
     override suspend fun getHealth(): HealthResponse {
+        val sessionActive = sessionManager.currentSession() != null
         return HealthResponse(
             status = "ok",
             accessibilityConnected = accessibilityRegistry.isConnected.value,
             version = serverVersion,
+            sessionActive = sessionActive,
         )
     }
 
     override suspend fun getDeviceInfo(): DeviceInfoResponse {
-        return deviceInfoProvider.getDeviceInfo()
+        val power = powerController.getPowerState()
+        val sessionActive = sessionManager.currentSession() != null
+        return deviceInfoProvider.getDeviceInfo().copy(
+            screenOn = power.screenOn,
+            deviceLocked = power.deviceLocked,
+            sessionActive = sessionActive,
+        )
+    }
+
+    override suspend fun getSession(): SessionStatusResponse {
+        return toSessionResponse(sessionManager.currentSession(), powerController.getPowerState())
+    }
+
+    override suspend fun startSession(request: StartSessionRequest): SessionStatusResponse {
+        val power = if (request.wakeScreen) {
+            powerController.wakeScreen()
+        } else {
+            powerController.getPowerState()
+        }
+        val session = sessionManager.startSession(request)
+        overlayFeedback.setSessionActive(
+            active = true,
+            label = session.label,
+            keepAwake = session.keepAwake,
+        )
+        return toSessionResponse(session, power)
+    }
+
+    override suspend fun endSession(): SessionStatusResponse {
+        sessionManager.endSession()
+        overlayFeedback.setSessionActive(active = false, label = null, keepAwake = false)
+        return toSessionResponse(null, powerController.getPowerState())
+    }
+
+    override suspend fun wakeDevice(): WakeResponse {
+        val power = powerController.wakeScreen()
+        return WakeResponse(
+            ok = true,
+            screenOn = power.screenOn,
+            deviceLocked = power.deviceLocked,
+            timestampMs = clockMs(),
+        )
     }
 
     override suspend fun captureScreenshot(options: CaptureOptions): CaptureResult {
+        sessionManager.requireActiveSessionAndTouch()
         overlayFeedback.beforeScreenshot()
-        val result = screenCapturer.capture(options)
-        overlayFeedback.showCaptured()
-        return result
+        return try {
+            screenCapturer.capture(options)
+        } finally {
+            overlayFeedback.showCaptured()
+        }
     }
 
     override suspend fun getUiTree(options: UiTreeOptions): UiTreeResponse {
+        sessionManager.requireActiveSessionAndTouch()
         return uiTreeInspector.inspect(options)
     }
 
@@ -95,6 +151,7 @@ class DefaultDeviceController(
         treeOptions: UiTreeOptions,
         includeScreenshot: Boolean,
     ): ScreenStateResponse {
+        sessionManager.requireActiveSessionAndTouch()
         val device = getDeviceInfo()
         val tree = getUiTree(treeOptions)
         val screenshot = if (includeScreenshot) {
@@ -111,6 +168,7 @@ class DefaultDeviceController(
     }
 
     override suspend fun tap(request: TapRequest): ActionResponse {
+        sessionManager.requireActiveSessionAndTouch()
         validateDuration(request.durationMs, minMs = 10L, maxMs = 500L, name = "tap durationMs")
         return withActionLock {
             val info = deviceInfoProvider.getDeviceInfo()
@@ -136,6 +194,7 @@ class DefaultDeviceController(
     }
 
     override suspend fun longPress(request: LongPressRequest): ActionResponse {
+        sessionManager.requireActiveSessionAndTouch()
         validateDuration(request.durationMs, minMs = 200L, maxMs = 5_000L, name = "long-press durationMs")
         return withActionLock {
             val info = deviceInfoProvider.getDeviceInfo()
@@ -161,6 +220,7 @@ class DefaultDeviceController(
     }
 
     override suspend fun swipe(request: SwipeRequest): ActionResponse {
+        sessionManager.requireActiveSessionAndTouch()
         validateDuration(request.durationMs, minMs = 50L, maxMs = 5_000L, name = "swipe durationMs")
         return withActionLock {
             val info = deviceInfoProvider.getDeviceInfo()
@@ -196,6 +256,7 @@ class DefaultDeviceController(
     }
 
     override suspend fun pressKey(request: KeyRequest): ActionResponse {
+        sessionManager.requireActiveSessionAndTouch()
         return withActionLock {
             overlayFeedback.showStatus("Key: ${request.key.name}")
             inputDispatcher.pressGlobalKey(request.key)
@@ -209,6 +270,7 @@ class DefaultDeviceController(
     }
 
     override suspend fun typeText(request: TypeTextRequest): TextActionResponse {
+        sessionManager.requireActiveSessionAndTouch()
         return withActionLock {
             overlayFeedback.showStatus("Typing...")
             val result = textInputController.typeText(request)
@@ -223,6 +285,7 @@ class DefaultDeviceController(
     }
 
     override suspend fun clearText(request: ClearTextRequest): TextActionResponse {
+        sessionManager.requireActiveSessionAndTouch()
         return withActionLock {
             overlayFeedback.showStatus("Clear text")
             val result = textInputController.clearText()
@@ -237,6 +300,7 @@ class DefaultDeviceController(
     }
 
     override suspend fun performImeAction(request: ImeActionRequest): TextActionResponse {
+        sessionManager.requireActiveSessionAndTouch()
         return withActionLock {
             overlayFeedback.showStatus("IME: ${request.action}")
             val result = textInputController.performImeAction(request)
@@ -251,10 +315,12 @@ class DefaultDeviceController(
     }
 
     override suspend fun listApps(query: String?): AppsListResponse {
+        sessionManager.requireActiveSessionAndTouch()
         return appController.listLaunchableApps(query)
     }
 
     override suspend fun launchApp(request: LaunchAppRequest): LaunchAppResponse {
+        sessionManager.requireActiveSessionAndTouch()
         val pkg = request.packageName?.trim()?.takeIf { it.isNotEmpty() }
         val uri = request.uri?.trim()?.takeIf { it.isNotEmpty() }
         if (pkg == null && uri == null) {
@@ -273,6 +339,7 @@ class DefaultDeviceController(
     }
 
     override suspend fun waitFor(request: WaitRequest): WaitResponse {
+        sessionManager.requireActiveSessionAndTouch()
         val hasText = !request.text.isNullOrEmpty()
         val hasResId = !request.resourceId.isNullOrEmpty()
         val hasCondition = hasText || hasResId
@@ -305,6 +372,7 @@ class DefaultDeviceController(
         validateDuration(request.pollIntervalMs, minMs = 50L, maxMs = MAX_POLL_INTERVAL_MS, name = "pollIntervalMs")
 
         while (true) {
+            sessionManager.requireActiveSessionAndTouch()
             val tree = uiTreeInspector.inspect(UiTreeOptions())
             val matched = UiTreeMatcher.findFirstMatch(
                 roots = tree.roots,
@@ -341,6 +409,21 @@ class DefaultDeviceController(
             delay(minOf(request.pollIntervalMs, remaining))
         }
     }
+
+    private fun toSessionResponse(
+        session: ActiveSession?,
+        power: PowerState,
+    ): SessionStatusResponse = SessionStatusResponse(
+        active = session != null,
+        sessionId = session?.sessionId,
+        label = session?.label,
+        startedAtMs = session?.startedAtMs,
+        lastActivityMs = session?.lastActivityMs,
+        idleTimeoutMs = session?.idleTimeoutMs,
+        keepAwake = session?.keepAwake ?: false,
+        screenOn = power.screenOn,
+        deviceLocked = power.deviceLocked,
+    )
 
     private fun validateDuration(value: Long, minMs: Long, maxMs: Long, name: String) {
         if (value !in minMs..maxMs) {

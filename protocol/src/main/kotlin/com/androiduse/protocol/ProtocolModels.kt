@@ -18,6 +18,7 @@ object ProtocolJson {
 @Serializable
 enum class ErrorCode {
     ACCESSIBILITY_NOT_CONNECTED,
+    SESSION_NOT_ACTIVE,
     UNAUTHORIZED,
     INVALID_REQUEST,
     SCREENSHOT_FAILED,
@@ -78,6 +79,7 @@ data class HealthResponse(
     val status: String,
     val accessibilityConnected: Boolean,
     val version: String,
+    val sessionActive: Boolean = false,
 )
 
 @Serializable
@@ -92,6 +94,9 @@ data class DeviceInfoResponse(
     val serverVersion: String,
     val accessibilityConnected: Boolean,
     val foregroundPackage: String? = null,
+    val screenOn: Boolean = true,
+    val deviceLocked: Boolean = false,
+    val sessionActive: Boolean = false,
 )
 
 @Serializable
@@ -291,5 +296,34 @@ data class WaitResponse(
     val matched: Boolean,
     val elapsedMs: Long,
     val matchedNode: UiNode? = null,
+    val timestampMs: Long,
+)
+
+@Serializable
+data class StartSessionRequest(
+    val label: String? = null,
+    val keepAwake: Boolean = true,
+    val wakeScreen: Boolean = true,
+    val idleTimeoutMs: Long = 600_000L,
+)
+
+@Serializable
+data class SessionStatusResponse(
+    val active: Boolean,
+    val sessionId: String? = null,
+    val label: String? = null,
+    val startedAtMs: Long? = null,
+    val lastActivityMs: Long? = null,
+    val idleTimeoutMs: Long? = null,
+    val keepAwake: Boolean = false,
+    val screenOn: Boolean = true,
+    val deviceLocked: Boolean = false,
+)
+
+@Serializable
+data class WakeResponse(
+    val ok: Boolean,
+    val screenOn: Boolean,
+    val deviceLocked: Boolean,
     val timestampMs: Long,
 )

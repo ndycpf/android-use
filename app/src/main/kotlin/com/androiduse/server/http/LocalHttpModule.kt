@@ -140,6 +140,30 @@ fun Application.configureAndroidUseHttp(
                 call.respond(controller.getDeviceInfo())
             }
 
+            post("/device/wake") {
+                call.respond(controller.wakeDevice())
+            }
+
+            route("/session") {
+                get {
+                    call.respond(controller.getSession())
+                }
+
+                post("/start") {
+                    val raw = call.receiveText().trim()
+                    val request = if (raw.isEmpty()) {
+                        com.androiduse.protocol.StartSessionRequest()
+                    } else {
+                        ProtocolJson.instance.decodeFromString<com.androiduse.protocol.StartSessionRequest>(raw)
+                    }
+                    call.respond(controller.startSession(request))
+                }
+
+                post("/end") {
+                    call.respond(controller.endSession())
+                }
+            }
+
             get("/screen/screenshot") {
                 val (options, encoding) = parseScreenshotQuery(call.request.queryParameters)
                 val result = controller.captureScreenshot(options)

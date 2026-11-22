@@ -21,6 +21,13 @@ class AndroidUseException(
             retryable = true,
         )
 
+        fun sessionNotActive(): AndroidUseException = AndroidUseException(
+            code = ErrorCode.SESSION_NOT_ACTIVE,
+            message = "No active session. Call POST /v1/session/start before screen observation or actions.",
+            httpStatus = 409,
+            retryable = false,
+        )
+
         fun invalidRequest(message: String): AndroidUseException = AndroidUseException(
             code = ErrorCode.INVALID_REQUEST,
             message = message,

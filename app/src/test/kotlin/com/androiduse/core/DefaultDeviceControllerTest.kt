@@ -1,16 +1,25 @@
 package com.androiduse.core
 
+import com.androiduse.protocol.AppInfo
+import com.androiduse.protocol.AppsListResponse
 import com.androiduse.protocol.CoordinateSpace
 import com.androiduse.protocol.DeviceInfoResponse
 import com.androiduse.protocol.ErrorCode
 import com.androiduse.protocol.GlobalKey
 import com.androiduse.protocol.ImageFormat
+import com.androiduse.protocol.ImeActionRequest
 import com.androiduse.protocol.KeyRequest
+import com.androiduse.protocol.LaunchAppRequest
 import com.androiduse.protocol.LongPressRequest
+import com.androiduse.protocol.StartSessionRequest
 import com.androiduse.protocol.SwipeRequest
 import com.androiduse.protocol.TapRequest
+import com.androiduse.protocol.TypeTextRequest
+import com.androiduse.protocol.UiBounds
+import com.androiduse.protocol.UiNode
 import com.androiduse.protocol.UiPoint
 import com.androiduse.protocol.UiTreeResponse
+import com.androiduse.protocol.WaitRequest
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
@@ -25,7 +34,60 @@ import org.junit.Test
 class DefaultDeviceControllerTest {
 
     @Test
-    fun `observation methods delegate accurately`() = runTest {
+    fun `capture and action endpoints fail with 409 SESSION_NOT_ACTIVE until session starts`() = runTest {
+        val overlay = RecordingOverlayFeedback()
+        val power = StaticDevicePowerController(PowerState(screenOn = false, deviceLocked = false))
+        val controller = DefaultDeviceController(
+            accessibilityRegistry = AccessibilityServiceRegistry(),
+            deviceInfoProvider = object : DeviceInfoProvider {
+                override fun getDeviceInfo(): DeviceInfoResponse = sampleDeviceInfo()
+            },
+            screenCapturer = object : ScreenCapturer {
+                override suspend fun capture(options: CaptureOptions): CaptureResult = sampleCapture()
+            },
+            uiTreeInspector = object : UiTreeInspector {
+                override suspend fun inspect(options: UiTreeOptions): UiTreeResponse = sampleTree()
+            },
+            inputDispatcher = RecordingInputDispatcher(),
+            textInputController = RecordingTextInputController(),
+            appController = RecordingAppController(),
+            sessionManager = SessionManager(idGenerator = { "sess-42" }),
+            powerController = power,
+            overlayFeedback = overlay,
+            serverVersion = "0.1.0",
+            clockMs = { 100L },
+        )
+
+        assertFalse(controller.getHealth().sessionActive)
+        assertFalse(controller.getDeviceInfo().screenOn)
+
+        assertSessionRequired { controller.captureScreenshot() }
+        assertSessionRequired { controller.getUiTree() }
+        assertSessionRequired { controller.tap(TapRequest(100.0, 100.0)) }
+        assertSessionRequired { controller.typeText(TypeTextRequest("hi")) }
+        assertSessionRequired { controller.listApps() }
+        assertSessionRequired { controller.waitFor(WaitRequest(durationMs = 10L)) }
+
+        val started = controller.startSession(StartSessionRequest(label = "agent", keepAwake = true, wakeScreen = true))
+        assertTrue(started.active)
+        assertEquals("sess-42", started.sessionId)
+        assertTrue(started.screenOn)
+        assertEquals(1, power.wakeCalls)
+        assertTrue(controller.getHealth().sessionActive)
+        assertTrue(overlay.events.contains("session:true:agent:keepAwake=true"))
+
+        // Observation & actions succeed inside active session.
+        assertNotNull(controller.captureScreenshot())
+        assertTrue(controller.tap(TapRequest(100.0, 200.0)).ok)
+
+        val ended = controller.endSession()
+        assertFalse(ended.active)
+        assertTrue(overlay.events.contains("session:false:null:keepAwake=false"))
+        assertSessionRequired { controller.captureScreenshot() }
+    }
+
+    @Test
+    fun `observation methods delegate accurately inside active session`() = runTest {
         val registry = AccessibilityServiceRegistry()
         val fakeInfo = sampleDeviceInfo()
         val fakeCapture = sampleCapture()
@@ -58,12 +120,14 @@ class DefaultDeviceControllerTest {
             serverVersion = "0.1.0",
             clockMs = { 99L },
         )
+        controller.startSession()
 
         val health = controller.getHealth()
         assertEquals("ok", health.status)
         assertFalse(health.accessibilityConnected)
+        assertTrue(health.sessionActive)
         assertEquals("0.1.0", health.version)
-        assertEquals(fakeInfo, controller.getDeviceInfo())
+        assertEquals(fakeInfo.copy(sessionActive = true), controller.getDeviceInfo())
 
         val requestedCapture = CaptureOptions(format = ImageFormat.PNG, quality = 90, maxDimension = 1200)
         assertEquals(fakeCapture, controller.captureScreenshot(requestedCapture))
@@ -78,7 +142,7 @@ class DefaultDeviceControllerTest {
             treeOptions = requestedTree,
             includeScreenshot = true,
         )
-        assertEquals(fakeInfo, stateWithShot.device)
+        assertEquals(fakeInfo.copy(sessionActive = true), stateWithShot.device)
         assertEquals(fakeTree, stateWithShot.tree)
         assertNotNull(stateWithShot.screenshot)
         assertEquals(99L, stateWithShot.timestampMs)
@@ -113,6 +177,7 @@ class DefaultDeviceControllerTest {
             serverVersion = "0.1.0",
             clockMs = { 500L },
         )
+        controller.startSession()
 
         controller.captureScreenshot()
 
@@ -147,7 +212,7 @@ class DefaultDeviceControllerTest {
         assertEquals("key", keyResp.action)
 
         val typeResp = controller.typeText(
-            com.androiduse.protocol.TypeTextRequest(text = "hello", clearFirst = true, submit = true),
+            TypeTextRequest(text = "hello", clearFirst = true, submit = true),
         )
         assertTrue(typeResp.ok)
         assertEquals("type", typeResp.action)
@@ -157,7 +222,7 @@ class DefaultDeviceControllerTest {
         val clearResp = controller.clearText()
         assertEquals("clear", clearResp.action)
 
-        val imeResp = controller.performImeAction(com.androiduse.protocol.ImeActionRequest("enter"))
+        val imeResp = controller.performImeAction(ImeActionRequest("enter"))
         assertEquals("ime", imeResp.action)
         assertTrue(imeResp.submitted)
 
@@ -165,7 +230,7 @@ class DefaultDeviceControllerTest {
         assertEquals(1, appsResp.count)
 
         val launchResp = controller.launchApp(
-            com.androiduse.protocol.LaunchAppRequest(packageName = "com.google.android.gm"),
+            LaunchAppRequest(packageName = "com.google.android.gm"),
         )
         assertTrue(launchResp.ok)
         assertEquals("com.google.android.gm", appController.lastLaunched?.packageName)
@@ -199,10 +264,10 @@ class DefaultDeviceControllerTest {
     fun `waitFor supports sleep, appear condition, gone condition, and timeout`() = runTest {
         var pollCount = 0
         var nowMs = 1_000L
-        val matchingNode = com.androiduse.protocol.UiNode(
+        val matchingNode = UiNode(
             nodeId = "n1",
             text = "Done",
-            bounds = com.androiduse.protocol.UiBounds(0, 0, 100, 50),
+            bounds = UiBounds(0, 0, 100, 50),
             center = UiPoint(50, 25),
         )
         val controller = DefaultDeviceController(
@@ -230,28 +295,28 @@ class DefaultDeviceControllerTest {
             inputDispatcher = RecordingInputDispatcher(),
             textInputController = RecordingTextInputController(),
             appController = RecordingAppController(),
+            sessionManager = SessionManager(clockMs = { nowMs }),
             serverVersion = "0.1.0",
             clockMs = { nowMs },
         )
+        controller.startSession()
 
         val appearResp = controller.waitFor(
-            com.androiduse.protocol.WaitRequest(text = "Done", timeoutMs = 1_000L, pollIntervalMs = 50L),
+            WaitRequest(text = "Done", timeoutMs = 1_000L, pollIntervalMs = 50L),
         )
         assertTrue(appearResp.ok)
         assertEquals("n1", appearResp.matchedNode?.nodeId)
         assertEquals(2, pollCount)
 
-        // Next poll (pollCount == 3) returns empty tree -> gone=true succeeds immediately.
         val goneResp = controller.waitFor(
-            com.androiduse.protocol.WaitRequest(text = "Done", gone = true, timeoutMs = 1_000L, pollIntervalMs = 50L),
+            WaitRequest(text = "Done", gone = true, timeoutMs = 1_000L, pollIntervalMs = 50L),
         )
         assertTrue(goneResp.ok)
         assertNull(goneResp.matchedNode)
 
-        // Timeout when condition never matches.
         try {
             controller.waitFor(
-                com.androiduse.protocol.WaitRequest(text = "Never", timeoutMs = 250L, pollIntervalMs = 50L),
+                WaitRequest(text = "Never", timeoutMs = 250L, pollIntervalMs = 50L),
             )
             fail("Expected WAIT_TIMEOUT")
         } catch (e: AndroidUseException) {
@@ -302,6 +367,16 @@ class DefaultDeviceControllerTest {
             listOf("first-start", "first-end", "second-start", "second-end"),
             events,
         )
+    }
+
+    private suspend fun assertSessionRequired(block: suspend () -> Unit) {
+        try {
+            block()
+            fail("Expected AndroidUseException(SESSION_NOT_ACTIVE)")
+        } catch (e: AndroidUseException) {
+            assertEquals(ErrorCode.SESSION_NOT_ACTIVE, e.code)
+            assertEquals(409, e.httpStatus)
+        }
     }
 
     private fun sampleDeviceInfo() = DeviceInfoResponse(
@@ -361,7 +436,7 @@ class DefaultDeviceControllerTest {
     private class RecordingTextInputController : TextInputController {
         val events = mutableListOf<String>()
 
-        override suspend fun typeText(request: com.androiduse.protocol.TypeTextRequest): TextInputResult {
+        override suspend fun typeText(request: TypeTextRequest): TextInputResult {
             events += "type:${request.text}:clear=${request.clearFirst}:submit=${request.submit}"
             return TextInputResult(method = "set_text", submitted = request.submit)
         }
@@ -371,29 +446,33 @@ class DefaultDeviceControllerTest {
             return TextInputResult(method = "set_text", submitted = false)
         }
 
-        override suspend fun performImeAction(request: com.androiduse.protocol.ImeActionRequest): TextInputResult {
+        override suspend fun performImeAction(request: ImeActionRequest): TextInputResult {
             events += "ime:${request.action}"
             return TextInputResult(method = "ime_enter", submitted = true)
         }
     }
 
     private class RecordingAppController : AppController {
-        var lastLaunched: com.androiduse.protocol.LaunchAppRequest? = null
+        var lastLaunched: LaunchAppRequest? = null
 
-        override suspend fun listLaunchableApps(query: String?): com.androiduse.protocol.AppsListResponse {
-            return com.androiduse.protocol.AppsListResponse(
+        override suspend fun listLaunchableApps(query: String?): AppsListResponse {
+            return AppsListResponse(
                 count = 1,
-                apps = listOf(com.androiduse.protocol.AppInfo("com.google.android.gm", "Gmail")),
+                apps = listOf(AppInfo("com.google.android.gm", "Gmail")),
             )
         }
 
-        override suspend fun launchApp(request: com.androiduse.protocol.LaunchAppRequest) {
+        override suspend fun launchApp(request: LaunchAppRequest) {
             lastLaunched = request
         }
     }
 
     private class RecordingOverlayFeedback : ActionOverlayFeedback {
         val events = mutableListOf<String>()
+
+        override fun setSessionActive(active: Boolean, label: String?, keepAwake: Boolean) {
+            events += "session:$active:$label:keepAwake=$keepAwake"
+        }
 
         override suspend fun beforeScreenshot() {
             events += "beforeScreenshot"

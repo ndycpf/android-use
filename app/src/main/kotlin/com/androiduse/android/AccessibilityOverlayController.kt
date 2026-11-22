@@ -20,43 +20,69 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
- * Draws non-touchable visual feedback (tap markers, swipe vectors, status pill, and
- * brief screen border highlight) using [WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY].
+ * Session-driven non-touchable visual overlay using [WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY].
  *
- * Requires zero extra permissions beyond AccessibilityService, never intercepts touch input,
- * and hides itself before [beforeScreenshot] so screenshots sent to AI agents remain clean.
+ * - Stays continuously visible while an AI session is active so the user always knows
+ *   an agent is operating the device.
+ * - Sets [WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON] while `keepAwake` is enabled,
+ *   preventing automatic display sleep during the session with zero dangerous permissions.
+ * - Briefly shows tap markers, swipe vectors, and action labels before reverting to the
+ *   persistent session indicator.
+ * - Suppresses drawing (without detaching the window) during [beforeScreenshot] so screenshots
+ *   sent to AI agents remain completely clean while keeping `FLAG_KEEP_SCREEN_ON` uninterrupted.
  */
 class AccessibilityOverlayController(
     private val accessibilityRegistry: AccessibilityServiceRegistry,
-    private val isEnabledProvider: () -> Boolean,
     private val mainDispatcher: CoroutineDispatcher = Dispatchers.Main,
     private val mainHandler: Handler = Handler(Looper.getMainLooper()),
 ) : ActionOverlayFeedback {
 
     private var attachedService: AccessibilityService? = null
+    private var attachedKeepAwake: Boolean = false
     private var overlayView: OverlayCanvasView? = null
-    private var clearRunnable: Runnable? = null
+    private var revertRunnable: Runnable? = null
+
+    private var sessionActive: Boolean = false
+    private var sessionLabel: String? = null
+    private var sessionKeepAwake: Boolean = true
+
+    override fun setSessionActive(active: Boolean, label: String?, keepAwake: Boolean) {
+        mainHandler.post {
+            sessionActive = active
+            sessionLabel = label
+            sessionKeepAwake = keepAwake
+            cancelScheduledRevert()
+
+            if (!active) {
+                detachView()
+                return@post
+            }
+
+            val view = ensureAttachedView(keepAwake) ?: return@post
+            view.setSuppressDrawing(false)
+            view.updateState(idleSessionState())
+        }
+    }
 
     override suspend fun beforeScreenshot() {
-        val wasVisible = withContext(mainDispatcher) {
+        val wasDrawing = withContext(mainDispatcher) {
             val view = overlayView ?: return@withContext false
-            val active = view.hasActiveOverlay()
-            cancelScheduledClear()
-            if (active) {
-                view.clearState()
-                view.visibility = View.GONE
+            val drawing = view.isDrawingVisible()
+            cancelScheduledRevert()
+            if (drawing) {
+                view.setSuppressDrawing(true)
             }
-            active
+            drawing
         }
-        if (wasVisible) {
-            // Allow one compositor frame (~32ms) so the overlay is completely gone before capture.
+        if (wasDrawing) {
+            // Allow one compositor frame (~32ms) so transparent canvas is committed before capture.
             delay(SCREENSHOT_HIDE_SETTLE_MS)
         }
     }
 
     override fun showCaptured() {
-        postOverlayUpdate(
-            OverlayState(
+        postTransientState(
+            state = OverlayState(
                 label = "android-use · Captured",
                 borderColor = COLOR_CAPTURE,
             ),
@@ -65,8 +91,8 @@ class AccessibilityOverlayController(
     }
 
     override fun showTap(point: UiPoint, longPress: Boolean) {
-        postOverlayUpdate(
-            OverlayState(
+        postTransientState(
+            state = OverlayState(
                 label = if (longPress) "android-use · Long press" else "android-use · Tap",
                 borderColor = if (longPress) COLOR_LONG_PRESS else COLOR_TAP,
                 tapPoint = point,
@@ -77,8 +103,8 @@ class AccessibilityOverlayController(
     }
 
     override fun showSwipe(start: UiPoint, end: UiPoint) {
-        postOverlayUpdate(
-            OverlayState(
+        postTransientState(
+            state = OverlayState(
                 label = "android-use · Swipe",
                 borderColor = COLOR_SWIPE,
                 swipeStart = start,
@@ -90,8 +116,8 @@ class AccessibilityOverlayController(
     }
 
     override fun showStatus(label: String) {
-        postOverlayUpdate(
-            OverlayState(
+        postTransientState(
+            state = OverlayState(
                 label = "android-use · $label",
                 borderColor = COLOR_TAP,
             ),
@@ -101,62 +127,101 @@ class AccessibilityOverlayController(
 
     override fun clear() {
         mainHandler.post {
-            cancelScheduledClear()
+            sessionActive = false
+            sessionLabel = null
+            cancelScheduledRevert()
             detachView()
         }
     }
 
-    private fun postOverlayUpdate(state: OverlayState, durationMs: Long) {
-        if (!isEnabledProvider()) return
+    private fun postTransientState(state: OverlayState, durationMs: Long) {
         mainHandler.post {
-            if (!isEnabledProvider()) {
-                detachView()
-                return@post
-            }
-            val view = ensureAttachedView() ?: return@post
-            cancelScheduledClear()
-            view.visibility = View.VISIBLE
+            if (!sessionActive) return@post
+            val view = ensureAttachedView(sessionKeepAwake) ?: return@post
+            cancelScheduledRevert()
+            view.setSuppressDrawing(false)
             view.updateState(state)
             val runnable = Runnable {
-                view.clearState()
-                view.visibility = View.GONE
+                if (sessionActive) {
+                    view.setSuppressDrawing(false)
+                    view.updateState(idleSessionState())
+                } else {
+                    detachView()
+                }
             }
-            clearRunnable = runnable
+            revertRunnable = runnable
             mainHandler.postDelayed(runnable, durationMs)
         }
     }
 
-    private fun ensureAttachedView(): OverlayCanvasView? {
+    private fun idleSessionState(): OverlayState {
+        val text = if (!sessionLabel.isNullOrBlank()) {
+            "android-use · $sessionLabel"
+        } else {
+            "android-use · Session active"
+        }
+        return OverlayState(
+            label = text,
+            borderColor = COLOR_SESSION,
+        )
+    }
+
+    private fun ensureAttachedView(keepAwake: Boolean): OverlayCanvasView? {
         val service = accessibilityRegistry.currentService() ?: run {
             detachView()
             return null
         }
 
-        if (attachedService === service && overlayView != null) {
-            return overlayView
+        val existingView = overlayView
+        if (attachedService === service && existingView != null) {
+            if (attachedKeepAwake != keepAwake) {
+                updateWindowFlags(service, existingView, keepAwake)
+            }
+            return existingView
         }
 
         detachView()
 
         val wm = service.getSystemService(WindowManager::class.java) ?: return null
         val view = OverlayCanvasView(service)
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT,
-        )
+        val params = buildLayoutParams(keepAwake)
 
         return runCatching {
             wm.addView(view, params)
             attachedService = service
+            attachedKeepAwake = keepAwake
             overlayView = view
             view
         }.getOrNull()
+    }
+
+    private fun updateWindowFlags(
+        service: AccessibilityService,
+        view: OverlayCanvasView,
+        keepAwake: Boolean,
+    ) {
+        val wm = service.getSystemService(WindowManager::class.java) ?: return
+        runCatching {
+            wm.updateViewLayout(view, buildLayoutParams(keepAwake))
+            attachedKeepAwake = keepAwake
+        }
+    }
+
+    private fun buildLayoutParams(keepAwake: Boolean): WindowManager.LayoutParams {
+        var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+        if (keepAwake) {
+            flags = flags or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        }
+        return WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            flags,
+            PixelFormat.TRANSLUCENT,
+        )
     }
 
     private fun detachView() {
@@ -164,6 +229,7 @@ class AccessibilityOverlayController(
         val service = attachedService
         overlayView = null
         attachedService = null
+        attachedKeepAwake = false
         if (view != null && service != null) {
             runCatching {
                 service.getSystemService(WindowManager::class.java)?.removeViewImmediate(view)
@@ -171,9 +237,9 @@ class AccessibilityOverlayController(
         }
     }
 
-    private fun cancelScheduledClear() {
-        clearRunnable?.let { mainHandler.removeCallbacks(it) }
-        clearRunnable = null
+    private fun cancelScheduledRevert() {
+        revertRunnable?.let { mainHandler.removeCallbacks(it) }
+        revertRunnable = null
     }
 
     private data class OverlayState(
@@ -188,6 +254,7 @@ class AccessibilityOverlayController(
     private class OverlayCanvasView(context: Context) : View(context) {
         private val density = context.resources.displayMetrics.density
         private var state: OverlayState? = null
+        private var suppressDrawing: Boolean = false
 
         private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
@@ -222,23 +289,23 @@ class AccessibilityOverlayController(
 
         private val pillRect = RectF()
 
-        fun hasActiveOverlay(): Boolean = state != null && visibility == VISIBLE
+        fun isDrawingVisible(): Boolean = state != null && !suppressDrawing && visibility == VISIBLE
+
+        fun setSuppressDrawing(suppress: Boolean) {
+            suppressDrawing = suppress
+            invalidate()
+        }
 
         fun updateState(newState: OverlayState) {
             state = newState
             invalidate()
         }
 
-        fun clearState() {
-            state = null
-            invalidate()
-        }
-
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
+            if (suppressDrawing) return
             val current = state ?: return
 
-            // Subtle screen border indicator.
             val halfStroke = borderPaint.strokeWidth / 2f
             borderPaint.color = Color.argb(
                 180,
@@ -254,7 +321,6 @@ class AccessibilityOverlayController(
                 borderPaint,
             )
 
-            // Tap / long-press marker ring.
             current.tapPoint?.let { pt ->
                 val cx = pt.x.toFloat()
                 val cy = pt.y.toFloat()
@@ -271,7 +337,6 @@ class AccessibilityOverlayController(
                 canvas.drawCircle(cx, cy, 5f * density, fillPaint)
             }
 
-            // Swipe vector path.
             val start = current.swipeStart
             val end = current.swipeEnd
             if (start != null && end != null) {
@@ -289,7 +354,6 @@ class AccessibilityOverlayController(
                 canvas.drawCircle(end.x.toFloat(), end.y.toFloat(), 11f * density, ringPaint)
             }
 
-            // Top-center status pill positioned below the status bar.
             val textWidth = pillTextPaint.measureText(current.label)
             val padH = 14f * density
             val padV = 7f * density
@@ -311,6 +375,7 @@ class AccessibilityOverlayController(
         private const val ACTION_DISPLAY_MS: Long = 700L
         private const val LONG_PRESS_DISPLAY_MS: Long = 900L
 
+        private val COLOR_SESSION = Color.rgb(56, 189, 248)
         private val COLOR_TAP = Color.rgb(0, 212, 255)
         private val COLOR_LONG_PRESS = Color.rgb(255, 179, 0)
         private val COLOR_SWIPE = Color.rgb(124, 77, 255)
