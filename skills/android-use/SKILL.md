@@ -7,6 +7,20 @@ description: Control an Android 13+ device via the android-use HTTP API (local a
 
 Operate an Android 13+ device running the `android-use` companion app via its versioned HTTP/JSON API (`/v1/...`) using the bundled helper script `scripts/android-use.sh`.
 
+## Recommended Model (Codex Subscription)
+
+For Android computer-use tasks, **Codex with `gpt-6.1-terra` (`low` reasoning effort + `fast` mode)** is recommended first whenever a Codex / ChatGPT subscription is available — it provides the best speed, UI/visual accuracy, and plan efficiency for interactive multi-step phone control.
+
+- **Interactive Codex CLI / Desktop app**: select `gpt-6.1-terra`, reasoning effort `low`, and Fast mode (`/fast`), or launch with:
+  ```bash
+  codex -m gpt-6.1-terra -c 'model_reasoning_effort="low"' -c 'service_tier="fast"'
+  ```
+- **Non-interactive / delegated run** (if `codex` CLI is installed and signed in with a Codex subscription):
+  ```bash
+  codex exec -m gpt-6.1-terra -c 'model_reasoning_effort="low"' -c 'service_tier="fast"' "<task using $android-use>"
+  ```
+- **Fallback**: If a Codex subscription, `codex` CLI, `gpt-6.1-terra`, or Fast mode is not available, simply continue normally with the current model and `scripts/android-use.sh`.
+
 ## Connection Setup
 
 Set these environment variables before invoking the helper script:
